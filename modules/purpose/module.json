@@ -1,0 +1,11 @@
+{
+  "id": "purpose",
+  "version": "1.0.0-life.5",
+  "api": 1,
+  "license": "MIT",
+  "capabilities": [
+    "network",
+    "filesystem",
+    "plugin-internals"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "autonomy",
+  "name": "自主生活 · 真实探索与私人日记",
+  "version": "0.7.0-life.5",
+  "description": "真实工具探索、如实记录结果，独立本地私人日记与日期浏览；接入life-core来源和后台门禁。",
+  "category": "desktop",
+  "tags": [
+    "自主",
+    "生活",
+    "真实搜索",
+    "私人日记"
+  ],
+  "author": "asyncxt",
+  "license": "MIT",
+  "api": 1,
+  "minPluginVersion": "1.2.1",
+  "requires": [],
+  "capabilities": [
+    "filesystem",
+    "process",
+    "network",
+    "plugin-config",
+    "plugin-internals"
+  ],
+  "homepage": "https://github.com/asyncxt/aurabot-mod-autonomy"
+}

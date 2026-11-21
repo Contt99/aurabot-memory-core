@@ -1,0 +1,11 @@
+{
+  "id": "qzone-social",
+  "version": "1.0.0-life.3",
+  "api": 1,
+  "license": "MIT",
+  "capabilities": [
+    "network",
+    "filesystem",
+    "plugin-internals"
+  ]
+}

@@ -1,0 +1,3 @@
+const {useState,useEffect}=React
+function Panel(){const [s,setS]=useState(null);useEffect(()=>{fetch('/aurabot/api/ext/image-familiar/state').then(r=>r.json()).then(setS)},[]);return h('div',{style:{fontSize:'16px',lineHeight:1.7}},h('h2',null,'图片理解复用'),h('p',null,'同图复用已有理解；GIF首次多帧识别。只按当前聊天读取，不记录谁常发。'),s?h('div',null,h('p',null,`本次加载：识别 ${s.counts.recognized} · 复用 ${s.counts.reused} · 失败 ${s.counts.failed}`),s.lastError?h('p',{role:'alert'},'最近错误：'+s.lastError):null,...s.items.map(r=>h('section',{key:r.scope+r.identity,style:{padding:'14px 0',borderBottom:'1px solid #8885'}},h('strong',null,r.scope+' · '+r.frames+'帧'),h('div',null,r.description),r.uncertainty?h('div',null,'不确定：'+r.uncertainty):null))):h('p',null,'正在读取…'))}
+return Panel

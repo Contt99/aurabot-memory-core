@@ -1,0 +1,7 @@
+{
+  "id": "memory",
+  "name": "记忆",
+  "version": "1.0.3-local.life",
+  "description": "保留原记忆库、权限与导出，追加统一经历忘记联动",
+  "api": 1
+}
