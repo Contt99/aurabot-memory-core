@@ -20,6 +20,17 @@ export function createMemoryStore(db) {
  const reason=id=>aliases(id).map(a=>retired.get(a)?.reason).find(Boolean)
  const retire=db.prepare("INSERT INTO memory_retired VALUES(?,?) ON CONFLICT(sourceId) DO UPDATE SET reason=excluded.reason WHERE excluded.reason='forgotten'")
  const transaction=fn=>{db.exec('BEGIN IMMEDIATE');try{const r=fn();db.exec('COMMIT');return r}catch(e){db.exec('ROLLBACK');throw e}}
+ const liveSinceKey='memory-handoff-live-since'
+ let liveSince=JSON.parse(db.prepare('SELECT value FROM kv WHERE key=?').get(liveSinceKey)?.value||'0')
+ if(!liveSince)transaction(()=>{
+  liveSince=db.prepare('SELECT MIN(recordedAt) AS at FROM memory_events').get().at||Date.now()
+  // v1 queued the entire vault during its initial indexing. Keep the events and
+  // seen scope lineage; drop only the obsolete queue entries, not their sources.
+  db.prepare(`DELETE FROM memory_handoffs WHERE sessionId='' AND status='pending' AND eventId IN (
+   SELECT id FROM memory_events WHERE type='utterance' AND COALESCE(occurredAt,0)<?
+   AND COALESCE(json_extract(data,'$.origin'),'')!='onebot')`).run(liveSince)
+  db.prepare('INSERT INTO kv(key,value) VALUES(?,?)').run(liveSinceKey,JSON.stringify(liveSince))
+ })
  const corrections=id=>db.prepare('SELECT * FROM memory_corrections WHERE targetId=? ORDER BY at DESC,rowid DESC').all(id).map(parse)
  function putEvent(row) {
   const old=event(row.id);if(old?.invalidatedAt)return old
@@ -28,11 +39,13 @@ export function createMemoryStore(db) {
   const corrected=old?.status==='corrected'
   if([row.id,...data.sourceIds].some(id=>{const r=reason(id);return r&&(r==='forgotten'||!corrected)}))return {id:row.id,invalidatedAt:1,data:{}}
   if(corrected&&data.vaultId&&!old.data.vaultId)retire.run(data.vaultId,'corrected')
+  const handoff=row.type==='utterance'&&!corrected&&(row.data?.origin==='onebot'||Number(row.occurredAt)>=liveSince)
+  const enqueue=()=>db.prepare("INSERT OR IGNORE INTO memory_handoffs(eventId,chatId,status) VALUES(?,?,'pending')").run(row.id,row.chatId)
   // A late duplicate receipt must not replace the authority's timestamp or excerpt.
-  if(old?.data.vaultId&&row.data?.origin==='onebot')return old
+  if(old?.data.vaultId&&row.data?.origin==='onebot'){if(handoff)enqueue();return old}
   db.prepare(`INSERT INTO memory_events(id,nativeKey,type,chatId,occurredAt,observedAt,recordedAt,status,data) VALUES(?,?,?,?,?,?,?,?,?)
    ON CONFLICT(id) DO UPDATE SET data=excluded.data,status=excluded.status,occurredAt=excluded.occurredAt`).run(row.id,row.nativeKey||null,row.type,row.chatId||'',row.occurredAt||null,row.observedAt||null,old?.recordedAt||Date.now(),corrected?'corrected':row.status||'observed',JSON.stringify(data))
-  if(row.type==='utterance'&&!corrected)db.prepare("INSERT OR IGNORE INTO memory_handoffs(eventId,chatId,status) VALUES(?,?,'pending')").run(row.id,row.chatId)
+  if(handoff)enqueue()
   return event(row.id)
  }
  const pending=(chatId,sessionId,limit=12)=>db.prepare(`SELECT e.* FROM memory_handoffs h JOIN memory_events e ON h.eventId=e.id
@@ -62,7 +75,7 @@ export function createMemoryStore(db) {
      db.prepare('INSERT OR IGNORE INTO memory_seen_scopes VALUES(?,?)').run(source,chatScope)
     if(!e||e.invalidatedAt)continue
     db.prepare('UPDATE memory_events SET observedAt=COALESCE(observedAt,?) WHERE id=?').run(at,e.id)
-    if(handoff&&e.type==='utterance'&&e.chatId===chatScope&&sessionId)
+    if(handoff&&e.type==='utterance'&&e.chatId===chatScope&&sessionId&&db.prepare("SELECT 1 FROM memory_handoffs WHERE eventId=? AND chatId=? AND sessionId=''").get(e.id,e.chatId))
      db.prepare("INSERT INTO memory_handoffs VALUES(?,?,?,?,'observed',?) ON CONFLICT(eventId,chatId,sessionId) DO UPDATE SET snapshotId=excluded.snapshotId,status='observed',observedAt=excluded.observedAt").run(e.id,e.chatId,sessionKey(sessionId),id,at)
    }
    return true

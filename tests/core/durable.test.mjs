@@ -11,6 +11,7 @@ const request=(h,text,sessionId='owner')=>h.stream({sessionId,messages:[{role:'u
 
 test('only the exact sourced lines in the actual request are observed and handed off',async t=>{
  const h=harness(t,{rows:[message(1,'INCLUDED','out'),message(2,'NEVER_INCLUDED','out')]})
+ for(const row of h.rows)h.emit('sent',[{type:'text',data:{text:row.text}}],{chatId,messageId:row.messageId,at:row.t})
  const s=h.core.buildContext({chatId,sessionId:'owner'})
  await request(h,s.text.replace(/^.*NEVER_INCLUDED.*$/m,''))
  const rows=h.core.timeline({chatId})
@@ -22,6 +23,7 @@ test('only the exact sourced lines in the actual request are observed and handed
 test('only the target chat session consumes its backlog; restore and move beyond the latest 30',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'handoff-')),rows=[message(1,'EARLY SPEECH','out'),...Array.from({length:45},(_,i)=>message(i+2,'new '+i))]
  let h=harness(t,{directory:dir,rows});t.after(()=>{h.close();fs.rmSync(dir,{recursive:true,force:true})})
+ h.emit('sent',[{type:'text',data:{text:rows[0].text}}],{chatId,messageId:rows[0].messageId,at:rows[0].t})
  const s=h.core.buildContext({chatId,purpose:'proactive'});await h.core.runWithContext(s,()=>request(h,s.text,'purpose'))
  assert.equal(h.core.memoryStatus().pendingHandoffs,1)
  h.close();h=harness(t,{directory:dir,rows})
@@ -29,6 +31,33 @@ test('only the target chat session consumes its backlog; restore and move beyond
  await request(h,next.text);assert.equal(h.core.memoryStatus().pendingHandoffs,0)
  assert.doesNotMatch(h.core.buildContext({chatId,sessionId:'owner'}).text,/EARLY SPEECH/)
  assert.match(h.core.buildContext({chatId,sessionId:'new-session'}).text,/EARLY SPEECH/)
+})
+
+test('history stays indexed without filling the live pending handoff queue',t=>{
+ const old=Date.now()-86_400_000
+ const rows=Array.from({length:18},(_,i)=>message(i+1,'HISTORICAL_'+i,'out',chatId,old+i))
+ const h=harness(t,{rows})
+ assert.equal(h.core.timeline({chatId}).length,18)
+ assert.equal(h.core.memoryStatus().pendingHandoffs,0)
+ assert.match(h.core.buildContext({chatId}).text,/HISTORICAL_17/)
+})
+
+test('v2 migration removes only stale queued projections, keeps newer or ACK-pending records and preserves event originals',t=>{
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'handoff-migration-'))
+ let h=harness(t,{directory,rows:[message(1,'OLD_PROJECTION','out',chatId,Date.now()-86_400_000)]})
+ t.after(()=>{h.close();fs.rmSync(directory,{recursive:true,force:true})})
+ h.core.sync()
+ const old=h.core.timeline({chatId})[0]
+ h.emit('sent',[{type:'text',data:{text:'NEW_ACK'}}],{chatId,messageId:'new-ack'})
+ h.close()
+ const db=new DatabaseSync(path.join(directory,'life.sqlite'))
+ db.prepare("DELETE FROM kv WHERE key='memory-handoff-live-since'").run()
+ db.prepare("INSERT OR IGNORE INTO memory_handoffs(eventId,chatId,status) VALUES(?,?,'pending')").run(old.id,chatId)
+ db.close()
+ h=harness(t,{directory})
+ assert.equal(h.core.memoryStatus().pendingHandoffs,1)
+ assert(h.core.timeline({chatId}).some(x=>x.id===old.id))
+ assert.match(h.core.buildContext({chatId}).text,/NEW_ACK/)
 })
 test('exact forget before the first projection survives stale replay, without removing an unrelated identical message',t=>{
  const h=harness(t,{rows:[message(1,'same body','out'),message(2,'same body','out')]})
