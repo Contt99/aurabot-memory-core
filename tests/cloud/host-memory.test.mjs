@@ -12,6 +12,7 @@ import {createDiaryMedia} from '../../modules/diary/lib/modules/diary/media.js'
 import imageDefinition from '../../modules/image-familiar/index.mjs'
 import {createRequire} from 'node:module'
 import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
+import {createLifeAdapter as purposeAdapter} from '../../modules/purpose/life.mjs'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -74,6 +75,33 @@ if(!source) {
    assert.deepEqual(dispatched,[[{type:'text',data:{text:'已完成你的管理操作'}}]])
   })
  }
+
+ test('installed hub blocks unsupported QQ attribution after a verified Tieba read',{timeout:10000},async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'provenance-'))
+  const inspected=Promise.withResolvers()
+  let prompt
+  const {h,hub,session,dispatched}=makeHost(t,{
+   sdk,rows:[message(1,'刚逛贴吧看到个帖，下面都在数3','out')],
+   model:async request=>{
+    prompt=JSON.stringify(request.messages)
+    hub.onSessionEvent(session,{type:'assistant/message',data:{turn:1,message:{role:'assistant',content:[{type:'text',text:'其实我还没真发过 就是看群里数得整齐 心里有点痒'}]}}})
+    hub.onSessionEvent(session,{type:'turn/end',data:{turn:1,reason:{kind:'completed'}}})
+   },
+   send:decision=>inspected.resolve(decision)
+  })
+  h.modules['life-core']=h.core
+  await h.core.perform({module:'tieba-reader',action:'read',chatId:chat.chatId,evidenceType:'provider'},async()=>({ok:true,title:'没活解散了得了',posts:[{text:'下面都在数3'}]}))
+  const purpose=purposeAdapter({...h.api,id:'purpose'})
+  const s=purpose.prepareContext({purpose:'proactive',chatId:chat.chatId,query:''})
+  assert.match(s.text,/素材渠道：贴吧.*没活解散了得了/)
+  assert.throws(()=>purpose.checkDraft('我好像也爱这样 没东西聊的时候就甩个3出去',s),/多次对应/)
+  assert.doesNotThrow(()=>purpose.checkDraft('看到他们都在数3，我也想跟着发一个。',s))
+  await hub.pushToSession(chat,[{type:'text',text:'你以前这么做过吗？'}],chat.userId)
+  assert.match(prompt,/素材渠道：贴吧/)
+  assert.equal(await inspected.promise,null)
+  assert.equal(dispatched.length,0)
+  assert(h.warnings.some(w=>w.includes('不能把外部素材或猜测写成群聊经历')))
+ })
 
  test('confirmed proactive QQ speech survives process restart and appears once with its original time in the next request',()=>{
   const root=fs.mkdtempSync(path.join(scratch,'restart-'))

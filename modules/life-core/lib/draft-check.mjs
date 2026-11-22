@@ -9,6 +9,46 @@ function sharedPhrase(a,b) {
  for(let n=Math.min(18,x.length,y.length);n>=4;n--)for(let i=0;i+n<=x.length;i++)if(y.includes(x.slice(i,i+n)))return n
  return 0
 }
+// These checks cover attributable chat behavior, not the persona's tastes or feelings.
+// A prior sentence saying "I do that" is not a receipt for doing it.
+const payloadText=s=>String(s||'').normalize('NFKC').trim().replace(/^[「『“"'‘]+|[」』”"'’。！!？?]+$/g,'').trim()
+const imagined=/(?:并非|不是|没(?:有)?|并没|不曾|不可能|想(?:去)?|打算|准备|希望|假如|如果|以后|将来|下次)(?:\s*(?:真|再|也|就|先|亲自|我|会|想去)){0,4}\s*$/
+function chatClaims(prose,snapshot,fail) {
+ const records=(snapshot.items||[]).filter(i=>i.refKind==='vault'&&i.sourceScopes?.length===1&&i.sourceScopes[0]===snapshot.chatId)
+ const receipts=records.filter(i=>i.type==='utterance'&&i.status==='confirmed'&&i.messageId)
+ const groupMessages=records.filter(i=>i.type==='message'&&i.status==='archived'&&/^group:\d+$/.test(snapshot.chatId))
+ // Leave quoted payloads such as 「3」 intact, but don't validate a sentence being quoted.
+ const text=prose.replace(/[「『“]([^」』”\n]*)[」』”]/g,(whole,inside)=>inside.length>4&&/(?:我|群里|群聊)/.test(inside)?'【引文】':whole)
+ for(const sentence of text.split(/[。！；;\n]+/)){
+  if(/[？?]\s*$/.test(sentence))continue
+  for(const clause of sentence.split(/[，,]/)){
+   for(const m of clause.matchAll(/(?<!看)(?:看(?:到|见|了)?|读到|听到|瞧见|发现)(?:在|从)?(?:QQ\s*)?群(?:里|聊(?:里)?)|(?:在|从)(?:QQ\s*)?群(?:里|聊(?:里)?)(?:刚刚?|之前|昨天|今天|也|又)?(?:看到|看见|读到|听到|瞧见|发现)/gi)){
+    const before=clause.slice(0,m.index),topic=clause.slice(m.index+m[0].length)
+    if(imagined.test(before)||/(?:你|他|她|他们|她们|让)[正刚也曾都在说的]{0,4}$/.test(before))continue
+    // Authorization of a result for this group is not evidence it came from a group.
+    if(!groupMessages.some(i=>sharedPhrase(topic,i.text)>=4))
+     return fail('unproven-group-source','没有与所述内容对应的 QQ 群消息，不能把外部素材或猜测写成群聊经历')
+   }
+   const forms=[
+    {pattern:/我(?:也|还|都|可|就|好像|以前|之前|平时|有时|偶尔|经常|常常|总是|常|一直|每次|通常|习惯|爱|喜欢|会|都会|有时候|真的?){0,8}(?:发过|发给过|回过|贴过|丢过|甩过)(.+?)(?=\s{2,}|$)/g,count:1},
+    {pattern:/我(?:也|还|都|可|就|好像|会|平时|的确|的确会){0,5}(?:经常|常常|总是|常|每次都|通常|习惯(?:性地)?|动不动就|总爱)(?:会|去|给你|给大家)?(?:发|甩|丢|贴|回)(.+?)(?=\s{2,}|$)/g,count:2},
+    {pattern:/的时候\s*(?:我)?(?:也)?就\s*(?:会|爱)?(?:随手)?(?:甩|丢|发|回)\s*(.+?)(?=\s{2,}|$)/g,count:2,implicit:true}
+   ]
+   for(const form of forms)for(const m of clause.matchAll(form.pattern)){
+    const before=clause.slice(0,m.index)
+    if(imagined.test(before)||form.implicit&&(!/我(?:[^。；]{0,60})(?:也爱|也会|就是|平时|喜欢|经常|经常会|习惯)/.test(sentence)
+      ||/(?:假如|如果|以后|下次|我(?:想要|打算|准备|希望))/.test(sentence.slice(0,sentence.indexOf(m[0])))))continue
+    const raw=m.at(-1).replace(/^(?:个|一个|一句|一张)\s*(?=[「『“"\d])/,'').replace(/(?:出去|过去|试试|呀|啊|的|啦)\s*$/,'')
+    const quoted=raw.match(/^[「『“"']([^」』”"']+)[」』”"']/)
+    const payload=payloadText(quoted?.[1]??raw)
+    // Count distinct matching native sends, never repeated snapshots of one receipt.
+    const proof=new Set(receipts.filter(i=>payload&&payloadText(i.text)===payload).map(i=>String(i.messageId)))
+    if(proof.size<form.count)return fail('unproven-self-action',form.count>1?'没有多次对应的发送记录，不能说成自己的习惯':'没有对应的发送记录，不能把想法写成自己做过')
+   }
+  }
+ }
+ return{ok:true}
+}
 export function beijingTime(at) {return at>0?new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(at):'时间未知'}
 export function timeMeaning(item,now=Date.now()) {
  const at=Number(item.occurredAt??item.at)||0
@@ -21,6 +61,10 @@ export function checkDraft(text,snapshot,{now=Date.now(),actions=[]}={}) {
  if(['public-diary','public-share'].includes(snapshot?.purpose)&&
     (secretText(prose)||!publicSafe(prose.replace(/https?:\/\/[^\s；，。"'<>]+/g,'[来源链接]'))))
   return fail('public-sensitive','公开草稿含疑似账号、联系方式或凭据，本次未发布')
+ if(['chat','proactive'].includes(snapshot?.purpose)){
+  const grounding=chatClaims(prose,snapshot,fail)
+  if(!grounding.ok)return grounding
+ }
  const parts=prose.split(/[。！？；\n]/)
  for(const clause of parts) {
   const denial=/我(?:刚才|刚刚|之前|可)?(?:没(?:有)?|从没|从未)(?:让你|叫你|说过|提过|要求你)([^，。！？；]{4,})/.exec(clause)

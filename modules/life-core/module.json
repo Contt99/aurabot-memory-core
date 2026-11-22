@@ -1,7 +1,7 @@
 {
   "id": "life-core",
   "name": "行动与经历核心",
-  "version": "0.2.0-local.4",
+  "version": "0.2.0-local.5",
   "api": 1,
   "minPluginVersion": "1.2.0",
   "description": "统一真实行动、经历、主动触达和日记来源权限",
