@@ -192,7 +192,7 @@ export function shouldRecord(row, { recordGroups = true, groupList = '', private
 export default {
   id: 'history-vault',
   name: '跨会话记忆',
-  version: '0.1.6-local.life',
+  version: '0.1.7-local.life',
   api: 1,
   description: '授权QQ聊天的完整原文永久留存，摘要分层、有界读取；显式忘记与清空除外',
   panel: 'panel.js',
@@ -247,6 +247,7 @@ export default {
         text TEXT NOT NULL
       )`)
       db.exec('CREATE INDEX IF NOT EXISTS idx_lines_chat_day ON vault_lines (chatId, day, t)')
+      db.exec('CREATE INDEX IF NOT EXISTS idx_lines_speaker_time ON vault_lines (uid, dir, t, id)')
       const columns = new Set(db.prepare('PRAGMA table_info(vault_lines)').all().map((row) => row.name))
       for (const [name, type] of [['messageKey', "TEXT NOT NULL DEFAULT ''"], ['rawJson', "TEXT NOT NULL DEFAULT ''"], ['derivedJson', "TEXT NOT NULL DEFAULT ''"], ['sourceAt', 'REAL NOT NULL DEFAULT 0']]) {
         if (!columns.has(name)) db.exec(`ALTER TABLE vault_lines ADD COLUMN ${name} ${type}`)
@@ -426,19 +427,73 @@ export default {
       return rows.filter(row => sourceAllowed(row.chatId)).map(materialRow)
     }
 
+    // New cards use only archive entries attributed by the inbound event itself.
+    // The self-test inject route and pre-event legacy rows have no such envelope.
+    function impressionRow(row, uid, scope) {
+      if (!row || row.uid !== uid || row.dir !== 'in' || !row.text.trim() || uid === String(api.config().botQQ || '') ||
+          !sourceAllowed(row.chatId)) return null
+      const group = row.chatId.startsWith('group:')
+      if (!(scope === row.chatId && group || (scope === 'self' || scope === 'public') && group ||
+          scope === 'self' && row.chatId === 'private:' + uid)) return null
+      let raw, derived
+      try { raw = JSON.parse(row.rawJson || 'null') } catch {}
+      if (raw?.post_type !== 'message') {
+        try { derived = JSON.parse(row.derivedJson || 'null') } catch {}
+      }
+      const native = raw?.post_type === 'message'
+      const compat = ['in','silent'].includes(derived?.kind) && String(derived.userId) === uid && derived.chatId === row.chatId
+      if (!native && !compat) return null
+      const originalAt = native ? Number(raw.time) * 1000 : Number(derived.t)
+      return { ...materialRow(row, { replyAnchor: group }), t: Number.isFinite(originalAt) && originalAt > 0 ? originalAt : 0 }
+    }
+
+    function impressionMaterial({ userId, scope, since = 0, limit = 40 } = {}) {
+      const uid = String(userId || ''), now = Date.now(), min = Math.max(0, Number(since) || 0)
+      if (!/^[1-9]\d*$/.test(uid) || !/^(?:self|public|group:[1-9]\d*)$/.test(String(scope))) return []
+      const count = Math.min(500, Math.max(1, Math.floor(Number(limit) || 40)))
+      const groupOnly = scope.startsWith('group:')
+      const query = db.prepare(groupOnly
+        ? "SELECT * FROM vault_lines WHERE uid = ? AND dir = 'in' AND t BETWEEN ? AND ? AND chatId = ? ORDER BY t DESC,id DESC"
+        : "SELECT * FROM vault_lines WHERE uid = ? AND dir = 'in' AND t BETWEEN ? AND ? ORDER BY t DESC,id DESC")
+      const rows = []
+      for (const row of query.iterate(uid, min, now, ...(groupOnly ? [scope] : []))) {
+        const item = impressionRow(row, uid, scope)
+        if (item) rows.push(item)
+        if (rows.length === count) break
+      }
+      return rows.reverse()
+    }
+
+    function impressionMaterialByIds(ids, { userId, scope } = {}) {
+      if (!Array.isArray(ids)) return []
+      const uid = String(userId || '')
+      if (!/^[1-9]\d*$/.test(uid) || !/^(?:self|public|group:[1-9]\d*)$/.test(String(scope))) return []
+      const query = db.prepare('SELECT * FROM vault_lines WHERE id = ?')
+      const rows = []
+      for (const id of new Set(ids)) {
+        const match = /^vault:([1-9]\d*)$/.exec(String(id))
+        const item = match && impressionRow(query.get(match[1]), uid, scope)
+        if (item) rows.push(item)
+      }
+      return rows
+    }
+
     /** Native metadata only: never include a reply/forward body or raw source JSON. */
-    function materialRow(row) {
+    function materialRow(row, { replyAnchor = false } = {}) {
       let raw = null
       try { raw = JSON.parse(row.rawJson || 'null') } catch {}
       const segments = Array.isArray(raw?.message) ? raw.message : []
       const atQQs = [...new Set(segments.filter(s => s?.type === 'at')
         .map(s => String(s.data?.qq ?? '')).filter(q => /^\d+$/.test(q)))]
       const replyId = String(segments.find(s => s?.type === 'reply')?.data?.id ?? '')
-      const author = replyId ? db.prepare("SELECT uid,dir FROM vault_lines WHERE chatId = ? AND messageKey = ? ORDER BY id DESC LIMIT 1").get(row.chatId, replyId) : null
+      const author = replyId ? (replyAnchor
+        ? db.prepare("SELECT id,uid,dir FROM vault_lines WHERE chatId = ? AND messageKey = ? AND id <> ? AND t <= ? AND (rawJson <> '' OR derivedJson <> '') ORDER BY id DESC LIMIT 1").get(row.chatId, replyId, row.id, row.t)
+        : db.prepare("SELECT uid,dir FROM vault_lines WHERE chatId = ? AND messageKey = ? ORDER BY id DESC LIMIT 1").get(row.chatId, replyId)) : null
       const replyToQQ = author ? String(author.dir === 'out' ? api.config().botQQ || '' : author.uid || '') : ''
       return { ...(row.id == null ? {} : { id: 'vault:' + row.id }), t: row.t,
         chatId: row.chatId, uid: row.uid, who: row.who, text: row.text,
-        messageId: String(row.messageKey || ''), atQQs, replyId, replyToQQ }
+        messageId: String(row.messageKey || ''), atQQs, replyId, replyToQQ,
+        ...(replyAnchor && author && /^[1-9]\d*$/.test(replyToQQ) ? { replySourceId: 'vault:' + author.id } : {}) }
     }
 
     /** Explicit diary source groups are independent of recording/host allowlists. */
@@ -974,6 +1029,6 @@ export default {
 
     api.onDispose(() => { forgetVersion++; db.close() })
     log.info('跨会话历史库就绪：三层存储 + 分层读取')
-    return { forgetPerson, impressionRecipients, diaryMaterial, diaryMaterialCurrent, timelinePage, timelineRecent, timelineCurrent }
+    return { forgetPerson, impressionRecipients, impressionMaterial, impressionMaterialByIds, diaryMaterial, diaryMaterialCurrent, timelinePage, timelineRecent, timelineCurrent }
   },
 }

@@ -214,7 +214,7 @@ export function createCardRenderer (config) {
       try {
         if (log && typeof log.debug === 'function') log.debug('印象卡片已写入 ' + file)
       } catch (logError) {}
-      return { ok: true, file, bytes: buf.length }
+      return { ok: true, file, bytes: buf.length, ...(req.includeImage ? { image: buf } : {}) }
     } catch (error) {
       const message = error && error.message ? String(error.message) : '卡片渲染失败'
       try {

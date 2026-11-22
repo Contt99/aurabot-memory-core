@@ -111,4 +111,33 @@ if(!source) {
   assert.equal(requests[1].messages.length,1)
   assert.doesNotMatch(JSON.stringify(requests[1]),/SYNTHETIC_DIARY_GROUP_MARKER|第一轮纸风车草稿/)
  })
+
+ test('installed hub awaits managed recall and sees one source-bound snapshot in the frozen request',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'hybrid-'))
+  const enter=Promise.withResolvers(),release=Promise.withResolvers(),decoded=[]
+  const {h,hub}=makeHost(t,{sdk,model:async request=>decoded.push(request)})
+  const id='memory:fixture@0123456789abcd012345'
+  let current=true
+  h.modules.memory={
+   contextForCore:()=>({text:'',sourceIds:[]}),
+   contextForCoreRecall:async ({query})=>{
+    enter.resolve(query);await release.promise
+    return{text:'与字面不同的合成偏好',sourceIds:[id],recall:{mode:'hybrid',reason:'vector-matched'}}
+   },
+   contextCurrent:ids=>current&&ids.every(s=>s===id)
+  }
+  const ask=hub.pushToSession(chat,[{type:'text',text:'想喝点什么？'}],chat.userId,{queryText:'想喝点什么？'})
+  assert.equal(await enter.promise,'想喝点什么？')
+  assert.equal(decoded.length,0)
+  release.resolve()
+  await ask
+  assert.equal(decoded.length,1)
+  const body=JSON.stringify(decoded[0].messages)
+  assert.equal((body.match(/【记忆快照:/g)||[]).length,1)
+  assert.match(body,/与字面不同的合成偏好/)
+  const sid=body.match(/【记忆快照:([\da-f-]{36})】/)[1]
+  assert.equal(h.core.contextDetail(sid).data.memoryRecall.mode,'hybrid')
+  current=false
+  await assert.rejects(h.stream(decoded[0]),/失效|来源/)
+ })
 }

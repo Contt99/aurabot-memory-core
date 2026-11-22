@@ -8,6 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { normalizeEvidence, normalizeInputs } from './evidence.mjs'
 
 export const STORE_VERSION = 1
 export const MAX_RECORDS = 2000
@@ -60,6 +61,8 @@ export function createRecord (opts) {
     materialVersion: [1, 2].includes(o.materialVersion) ? o.materialVersion : 0,
     ...(Array.isArray(o.sourceScopes) ? { sourceScopes: [...new Set(o.sourceScopes.map(String))] } : {}),
     ...(Array.isArray(o.sourceIds) ? { sourceIds: [...new Set(o.sourceIds.map(String))] } : {}),
+    ...(Array.isArray(o.inputs) ? { inputs: normalizeInputs(o.inputs) } : {}),
+    ...(o.evidence ? { evidence: normalizeEvidence(o.evidence) } : {}),
     createdAt: finite(o.createdAt, now),
     updatedAt: finite(o.updatedAt, now),
   }

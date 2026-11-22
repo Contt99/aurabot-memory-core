@@ -34,6 +34,11 @@ export function canSendRecord(id, chatId) {
   return /^private:\d+$/.test(String(chatId))
 }
 
+export function scopeCanRead(scope, userId, source) {
+  if (/^group:[1-9]\d*$/.test(String(source))) return scope === source || scope === 'self' || scope === 'public'
+  return scope === 'self' && source === 'private:' + userId
+}
+
 export function materialAllowed(ref, chatId, item, { row = false, now = Date.now() } = {}) {
   const s = scopeOf(ref.personId)
   if (!s || !item || item.forgottenAt || item.invalidAt || item.kind === 'gist' || item.kind === 'seen') return false

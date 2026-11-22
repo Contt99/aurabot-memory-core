@@ -1,10 +1,11 @@
 import {createHash} from 'node:crypto'
-import {scopedPersonId,scopeOf} from './scope.mjs'
+import {scopedPersonId,scopeOf,scopeCanRead} from './scope.mjs'
 
 // Content versioning is provenance, not a release-integrity check. Exclude aliases
 // and display-only caches: unrelated writes must not revoke a prepared reply.
 export const cardSourceId = r => 'impression:' + r.id + '@' + createHash('sha256').update(JSON.stringify([
  r.description,r.total,r.scores,r.materialVersion,r.updatedAt,r.sourceScopes,r.sourceIds,r.userId,r.displayName,
+ ...(r.inputs || r.evidence ? [r.inputs, r.evidence] : []),
 ])).digest('hex').slice(0,20)
 const baseId = id => String(id).replace(/@[a-f0-9]{20}$/, '')
 export function createCardContext({api,store,conf,lastSpeaker,isDisposed}) {
@@ -16,15 +17,28 @@ export function createCardContext({api,store,conf,lastSpeaker,isDisposed}) {
  }
  function recordCurrent(record,seen=new Set()) {
   if(!record||record.materialVersion!==2||seen.has(record.id))return false
-  const scope=scopeOf(record.id)?.scope
+  const info=scopeOf(record.id)
+  if(!info||info.userId!==String(record.userId))return false
+  const scope=info.scope
   // Old group cards have an exact source scope; old composites do not. Keep
   // unknown composites in the management archive instead of washing them public.
   const scopes=Array.isArray(record.sourceScopes)?record.sourceScopes:scope?.startsWith('group:')?[scope]:null
-  if(!scopes||!scopes.every(scopeAllowed))return false
+  if(!scopes||!scopes.every(chatId=>scopeCanRead(scope,record.userId,chatId)&&scopeAllowed(chatId)))return false
+  const inputs=record.inputs||[], vault=api.use('history-vault'), memory=api.use('memory')
+  const inputIds=new Set(inputs.map(i=>i.id)), replyIds=new Set(inputs.map(i=>i.replySourceId).filter(Boolean))
+  if(inputs.some(i=>!scopes.includes(i.chatId)||!(record.sourceIds||[]).includes(i.id)||(i.replySourceId&&!(record.sourceIds||[]).includes(i.replySourceId))))return false
+  const raw=inputs.filter(i=>i.id.startsWith('vault:'))
+  if(raw.length) {
+   const rows=vault?.impressionMaterialByIds?.(raw.map(i=>i.id),{userId:record.userId,scope})
+   const byId=new Map((rows||[]).map(row=>[row.id,row]))
+   if(!raw.every(i=>{const row=byId.get(i.id);return row?.chatId===i.chatId&&(!i.replySourceId||(i.replySourceId===row.replySourceId&&i.replyToQQ===row.replyToQQ))}))return false
+  }
+  if(inputs.some(i=>i.id.startsWith('memory:')&&memory?.contextCurrent?.([i.id],{chatId:i.chatId})!==true))return false
   seen.add(record.id)
   for(const id of record.sourceIds||[]) {
-   if(String(id).startsWith('vault:')) {if(api.use('history-vault')?.timelineCurrent?.([id])!==true)return false}
-   else if(String(id).startsWith('memory:')) {const chatId=scope?.startsWith('group:')?scope:'private:'+record.userId;if(api.use('memory')?.contextCurrent?.([id],{chatId})!==true)return false}
+   if(inputIds.has(id)||replyIds.has(id))continue
+   if(String(id).startsWith('vault:')) {if(vault?.timelineCurrent?.([id],scope.startsWith('group:')?{chatId:scope}:{})!==true)return false}
+   else if(String(id).startsWith('memory:')) {const chatId=scope?.startsWith('group:')?scope:'private:'+record.userId;if(memory?.contextCurrent?.([id],{chatId})!==true)return false}
    else if(String(id).startsWith('impression:')) {const other=store.get(baseId(id).slice('impression:'.length));if(!other||cardSourceId(other)!==id||!recordCurrent(other,new Set(seen)))return false}
    else return false
   }

@@ -23,6 +23,7 @@ function stamp(ts) {
 
 return function Panel({ settings, draftSettings, setSettings, save, toast }) {
   const s = draftSettings || settings || {}
+  const autoDream = s.dreamEnabled && s.dreamAutoEnabled !== false
   const [state, setState] = useState(null)
   const [dreams, setDreams] = useState([])
   const [busy, setBusy] = useState(false)
@@ -243,11 +244,17 @@ return function Panel({ settings, draftSettings, setSettings, save, toast }) {
       ),
       h('label', { className: 'ab-small' },
         h('input', { type: 'checkbox', checked: Boolean(s.dreamEnabled), onChange: (e) => patch({ dreamEnabled: e.target.checked }) }),
-        ' 做梦'
+        ' 允许做梦'
       ),
       h('label', { className: 'ab-small' },
-        h('input', { type: 'checkbox', checked: Boolean(s.dreamInRemOnly), onChange: (e) => patch({ dreamInRemOnly: e.target.checked }) }),
-        ' 只在 REM 做梦'
+        h('input', { type: 'checkbox', checked: Boolean(autoDream), disabled: !s.dreamEnabled,
+          onChange: (e) => patch({ dreamAutoEnabled: e.target.checked }) }),
+        ' 睡着后自动做梦'
+      ),
+      h('label', { className: 'ab-small' },
+        h('input', { type: 'checkbox', checked: Boolean(s.dreamInRemOnly), disabled: !autoDream,
+          onChange: (e) => patch({ dreamInRemOnly: e.target.checked }) }),
+        ' 自动梦只在 REM 生成'
       ),
       h('label', { className: 'ab-small' },
         h('input', { type: 'checkbox', checked: Boolean(s.farewellEnabled), onChange: (e) => patch({ farewellEnabled: e.target.checked }) }),
@@ -295,7 +302,7 @@ return function Panel({ settings, draftSettings, setSettings, save, toast }) {
             h('div', { className: 'ab-small', style: { marginTop: '6px', whiteSpace: 'pre-wrap', lineHeight: 1.6 } }, d.text)
           ))
         )
-        : h('div', { className: 'ab-note', style: { marginTop: '8px' } }, '还没有记得住的梦。她睡着以后会在 REM 阶段做梦，醒来按强度决定记得多少。')
+        : h('div', { className: 'ab-note', style: { marginTop: '8px' } }, '还没有记得住的梦。')
     )
   )
 }

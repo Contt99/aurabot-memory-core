@@ -18,7 +18,7 @@
 从工作区运行：
 
 ```powershell
-node --test tests/history/memory.test.mjs tests/history/vault.test.mjs
+node --test tests/history/memory.test.mjs tests/history/vault.test.mjs tests/history/managed-vector.test.mjs
 ```
 
 测试使用隔离合成 SQLite 数据和模型桩，不连接生产、不发送真实 QQ/Qzone、不产生模型费用。
@@ -39,3 +39,9 @@ node --test tests/history/memory.test.mjs tests/history/vault.test.mjs
 就地更正/删除会按原ID通知核心。`abstractOf`原文撤回会联动撤回既存改写摘要；原文更正/删除会撤回同源聊天的旧无血缘摘要；显式忘记时，无逐行血缘的本人摘要和有真实本人匹配原文的聊天摘要整段失效，避免换一种说法绕过忘记；不删无关聊天原文。自然语言忘记仍只做一次同步传播，返回原有联动错误字段。
 
 旧无血缘摘要与旧综合卡在更正、忘记或来源撤权时必须撤回或刷新；这是隔离所需的派生视图失效，不改变原文保留合同。
+
+## 1.0.3-local.life.1：普通 QQ 聊天语义回忆
+
+在 life-core 接管的普通 QQ 对话里，已启用向量检索且有获准的已索引事实时，`contextForCoreRecall` 用本轮原始消息（至多最后 600 字符）查一次现有 embedding 服务；命中后与关键词结果一起排序。上一句只在本地参加关键词匹配。既有触发词、查询缓存和 2 秒超时仍有效；忘记命令不做语义查询。
+
+语义回忆仍用同一批精选事实、来源权限和内容版本，查询结束后重新核对。同步 `contextForCore`、后台调用、手工 `recall_memory` 和未接管聊天的旧入口保持原合同。

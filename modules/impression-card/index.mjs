@@ -1,4 +1,5 @@
 import { createCardContext, cardSourceId } from './lib/context.mjs'
+import { exactMemoryId, modelEvidence, normalizeEvidence } from './lib/evidence.mjs'
 import { createOutcomeRecorder } from './life-outcome.mjs'
 // 印象卡片（Aurabot 用户扩展）
 //
@@ -36,7 +37,7 @@ import {
   renderTemplate, buildSystemPrompt, sanitizeDescription, MAX_NOTE_CHARS,
 } from './lib/llm.mjs'
 
-const VERSION = '1.0.8-local.life'
+const VERSION = '1.0.9-local.life'
 
 /** Electron 里 process.resourcesPath 一定在；纯 Node 下可能没有。 */
 function safeResourcesPath () {
@@ -141,8 +142,8 @@ export default {
     { key: 'guestColdStart', label: '群友冷启动', type: 'switch', hint: '关掉时，没有档案的人查卡不会触发模型生成，只看已有档案' },
     { key: 'refreshAdminOnly', label: '刷新仅管理员', type: 'switch', hint: '关掉后任何人都能 /刷新印象（会消耗模型额度）' },
     { key: 'adminQQ', label: '管理员 QQ', type: 'text', hint: '逗号或空格分隔；主人 QQ 自动算管理员' },
-    { key: 'noteSizeLimit', label: '卡面笔记字数', type: 'number', min: 20, max: 2000, step: 10, hint: '卡面右侧笔记的显示上限；持久笔记超长时临时用模型精简，不改库' },
-    { key: 'persistentNote', label: '持久印象笔记', type: 'switch', hint: '开：库里可以攒长文，卡面临时精简；关：写入时就按卡面上限精简' },
+    { key: 'noteSizeLimit', label: '卡面笔记字数', type: 'number', min: 20, max: 2000, step: 10, hint: '卡面右侧笔记的显示上限；有引用的笔记不做模型改写' },
+    { key: 'persistentNote', label: '持久印象笔记', type: 'switch', hint: '开启后，已有笔记超过卡面上限时，轻量微调只改分，不再追加短笔记' },
     { key: 'notifyEnabled', label: '系统通知', type: 'switch', hint: '加减分后在当前聊天播报（原始插件的 RPG 风格通知）' },
     { key: 'notifyDimensions', label: '通知哪些维度', type: 'text', hint: '维度 key 用逗号分隔；填 total 只通知好感度，填 * 通知全部，留空不通知' },
     { key: 'notifyTemplate', label: '通知模板', type: 'textarea', hint: '可用 {name}{dimension}{delta}{new_value}{reason}{nickname}；留空用内置模板' },
@@ -219,7 +220,7 @@ export default {
       forgetOff?.(); forgetCore = core
       forgetOff = core?.onForget?.(event => {
         if (event.qq && event.query) sourceEpoch.set('qq:' + event.qq, (sourceEpoch.get('qq:' + event.qq) || 0) + 1)
-        if (event.chatId) sourceEpoch.set(event.chatId, (sourceEpoch.get(event.chatId) || 0) + 1)
+        if (event.chatId && !(event.sourceIds || []).length) sourceEpoch.set(event.chatId, (sourceEpoch.get(event.chatId) || 0) + 1)
         for (const id of event.sourceIds || []) { const key = String(id).replace(/@[a-f0-9]{20}$/, ''); sourceEpoch.set(key, (sourceEpoch.get(key) || 0) + 1) }
         coreContext.forget(event)
       })
@@ -375,64 +376,45 @@ export default {
       return defaultChat(ref.personId) || 'private:' + ref.userId
     }
 
-    async function memoryBlock (ref, chatId, sources) {
+    function memoryBlock (ref, chatId, sources) {
       const out = []
       try {
-        // 不读跨来源、不透明的人物小档案；从原始条目按明确来源和对象筛选。
+        // 只读有固定版本、当前仍可见的精选记忆；旧印象不是新一轮的证据。
         const memory = api.use('memory')
         const items = memory?.list?.() || []
-        for (const item of items.filter(it => coreContext.scopeAllowed(it.chatId) && materialAllowed(ref, chatId, it))
+        for (const item of items.filter(it => it.text && exactMemoryId(it.contextSourceId) && coreContext.scopeAllowed(it.chatId) &&
+            materialAllowed(ref, chatId, it) && memory.contextCurrent?.([it.contextSourceId], {chatId: it.chatId}) === true)
           .sort((a, b) => Number(b.at || 0) - Number(a.at || 0)).slice(0, 40)) {
-          if (item.text && sources) { sources.scopes.add(item.chatId); sources.ids.add(item.contextSourceId || 'memory:' + item.id) }
-          if (item.text) out.push('[' + item.chatId + '] ' + String(item.text).replace(/\s+/g, ' ').slice(0, 300))
+          addInput(sources,{ id: item.contextSourceId, chatId: item.chatId })
+          out.push('[' + item.contextSourceId + '；' + item.chatId + '；精选记忆，不是原话] ' + JSON.stringify(String(item.text).replace(/\s+/g, ' ').slice(0, 300)))
         }
       } catch (error) {
         log.debug('读记忆失败：' + (error?.message || error))
       }
-      const scope = scopeOf(ref.personId)?.scope
-      // 综合卡只吸收各群的独立印象；本人私聊可额外读自己的旧综合卡。
-      // 旧版共用档案来源混杂，留在面板归档，绝不作为新卡的素材。
-      const records = store.all().filter(record => {
-        if (record.userId !== ref.userId) return false
-        const source = scopeOf(record.id)?.scope
-        return record.id === ref.personId || ((scope === 'self' || scope === 'public') && source?.startsWith('group:'))
-      }).slice(0, 30)
-      for (const record of records) {
-        if (coreContext.recordCurrent(record) && record.description) { if (sources) { (record.sourceScopes || [scopeOf(record.id)?.scope]).filter(Boolean).forEach(s => sources.scopes.add(s)); sources.ids.add(cardSourceId(record)); if (record.id === ref.personId) (record.sourceIds || []).forEach(id => sources.ids.add(id)) }; out.push('（' + scopeLabel(record.id) + '的已有印象）' + record.description.slice(0, 800)) }
-      }
-      const unique = [...new Set(out.filter(Boolean))]
-      return unique.length ? unique.map(line => '- ' + line).join('\n') : '（无）'
+      return out.length ? out.join('\n') : '（无）'
     }
 
     function recentMaterialText (ref, chatId, limit, sources) {
-      const rows = []
-      for (let i = 1; i >= 0; i--) {
-        for (const row of rowsOfDay(dayKey(Date.now() - i * 86400000))) {
-          if (usableChatRow(row) && coreContext.scopeAllowed(row.chatId) && materialAllowed(ref, chatId, row, { row: true })) rows.push(row)
-        }
-      }
-      const legacy = rows.sort((a,b) => Number(a.t) - Number(b.t)).slice(-limit)
-        .map(row => { if (sources) sources.scopes.add(row.chatId); return '[' + row.chatId + '] ' + (Number(row.t) > 0 ? clockOf(Number(row.t)) : '原时未知') + ' 发言者QQ：' + ref.userId + '；' + recipientLabel(row, api.config().botQQ) + '；本人原文：' + JSON.stringify(String(row.text || '').slice(0, 300)) }).join('\n')
       let events = []
       try {
-        events = api.use('history-vault')?.impressionRecipients?.({ userId: ref.userId, scope: scopeOf(ref.personId)?.scope, since: Date.now() - 2 * 86400000, limit: Math.min(200, limit) }) || []
-      } catch (error) { log.debug('读取原始接收对象线索失败，保持未知：' + (error?.message || error)) }
-      const native = events.filter(row => usableChatRow(row) && coreContext.scopeAllowed(row.chatId) && materialAllowed(ref, chatId, row, { row: true }))
-        .filter(row => row.atQQs?.length || row.replyId).slice(-40)
-        .map(row => { if (sources) { sources.scopes.add(row.chatId); if (row.id) sources.ids.add(row.id) }; return '[' + row.chatId + '] 消息ID：' + row.messageId + '；发言者QQ：' + ref.userId + '；' + recipientLabel(row, api.config().botQQ) + '；本人原文：' + JSON.stringify(String(row.text || '').slice(0, 300)) }).join('\n')
-      return [legacy, native ? '【原始事件补充；接收对象线索仅适用于这一事件，不能套用到上方相邻或同文的旧流水；没有按文本或时间猜配事件】\n' + native : ''].filter(Boolean).join('\n')
+        events = api.use('history-vault')?.impressionMaterial?.({ userId: ref.userId, scope: scopeOf(ref.personId)?.scope, since: Date.now() - 2 * 86400000, limit }) || []
+      } catch (error) { log.debug('读取可核验聊天失败：' + (error?.message || error)) }
+      const rows = events.filter(row => /^vault:[1-9]\d*$/.test(row?.id) && coreContext.scopeAllowed(row.chatId) &&
+        materialAllowed(ref, chatId, row, { row: true }))
+      return rows.map(row => {
+        addInput(sources, row)
+        return '[' + row.id + '；' + row.chatId + '；' + (Number(row.t) > 0 ? dateTimeOf(Number(row.t)) : '原时未知') + '] ' +
+          '发言者QQ：' + row.uid + '；' + recipientLabel(row, api.config().botQQ) + '；本人原文：' + JSON.stringify(String(row.text || '').slice(0, 300))
+      }).join('\n')
     }
 
-    // 有群聊材料的档案统一观察者叙事，包括本人综合卡，避免混合材料借用私聊身份。
-    function hasGroupMaterial (ref, recent = '', memory = '') {
-      return scopeOf(ref.personId)?.scope !== 'self' || /group:|群聊|群 \d/.test(recent + memory)
-    }
-
-    async function askWithPerspective (ref, c, text, maxTokens, groupMaterial, json = true) {
+    async function askWithPerspective (ref, c, text, maxTokens, groupMaterial, readResult, current = () => {}) {
       for (let attempt = 0; attempt < 2; attempt++) {
+        current()
         const raw = await api.ask({ system: systemFor(c, ref), text: text + (attempt ? '\n【重写】上一轮出现接收对象/视角错误。不要沿用上一轮内容，按观察者叙事重新输出；群聊不写对我/让我/给我，未知接收对象不要猜测。' : ''), maxTokens })
-        const parsed = json ? extractJsonObject(raw) : String(raw || '')
-        if (!perspectiveViolation(json ? parsed?.description : parsed, groupMaterial)) return parsed
+        current()
+        const result = readResult ? readResult(extractJsonObject(raw)) : String(raw || '')
+        if (!perspectiveViolation(readResult ? result?.description : result, groupMaterial)) return result
       }
       throw new Error('接收对象/观察者视角校验未通过，原档案保持不变。')
     }
@@ -440,14 +422,6 @@ export default {
     function personIdentities (ref) {
       const stored = store.get(ref.personId)
       return identity.identityBlock(ref, stored)
-    }
-
-    function existingBlock (record, c) {
-      if (!coreContext.recordCurrent(record)) return ''
-      const lines = ['你之前对 ta 的档案（仅供参考，不必在旧分附近微调，允许大幅改动）：', '- ' + c.totalLabel + '：' + formatNum(record.total)]
-      for (const d of c.dimensions) lines.push('- ' + d.label + '：' + formatNum(scoreOf(record, d.key, c)))
-      if (record.materialVersion === 2 && record.description) lines.push('- 旧简介：' + record.description.slice(0, 800))
-      return lines.join('\n') + '\n'
     }
 
     function scoreOf (record, key, c) {
@@ -485,22 +459,59 @@ export default {
       return observeCard('impression-generate', ref, chatId, () => generateRecordNow(ref, chatId, existing))
     }
 
-    const newSources = () => ({ scopes: new Set(), ids: new Set() })
+    const newSources = () => ({ scopes: new Set(), ids: new Set(), inputs: new Map(), visible: new Map() })
+    function addInput(sources, row) {
+      const { id, chatId, replySourceId, replyToQQ } = row
+      sources.scopes.add(chatId)
+      sources.ids.add(id)
+      if (replySourceId) sources.ids.add(replySourceId)
+      sources.inputs.set(id, { id, chatId, ...(replySourceId ? { replySourceId, replyToQQ } : {}) })
+      sources.visible.set(id, row)
+    }
     const sourceStamp = (ref, sources) => JSON.stringify(['qq:' + ref.userId, ...sources.scopes, ...[...sources.ids].map(id => String(id).replace(/@[a-f0-9]{20}$/, ''))].map(key => sourceEpoch.get(key) || 0))
     function sourceRecord(ref, sources) {
-      return { id: ref.personId, userId: ref.userId, materialVersion: 2, sourceScopes: [...sources.scopes], sourceIds: [...sources.ids].filter(id => !id.startsWith('impression:' + ref.personId + '@')) }
+      return { id: ref.personId, userId: ref.userId, materialVersion: 2,
+        sourceScopes: [...sources.scopes], sourceIds: [...sources.ids], inputs: [...sources.inputs.values()] }
     }
-    function checkMaterial(ref, sources, stamp) {
-      if (disposed || stamp !== sourceStamp(ref, sources) || !coreContext.recordCurrent(sourceRecord(ref, sources))) throw new Error('印象来源已失效或授权已撤销，原档案保持不变。')
+    function checkMaterial(ref, chatId, sources, stamp, baselineId) {
+      const stored = store.get(ref.personId)
+      if (disposed || (chatId && !coreContext.scopeAllowed(chatId)) || stamp !== sourceStamp(ref, sources) ||
+          (stored ? cardSourceId(stored) : '') !== baselineId || !coreContext.recordCurrent(sourceRecord(ref, sources))) {
+        throw new Error('印象来源或档案已改变，或授权已撤销，未写入新档案。')
+      }
+    }
+    function asCited(ref, parsed, scores, c, sources, noteLimit = c.noteSizeLimit) {
+      const bot = api.config().botQQ
+      const names = [c.botName, '机器人', 'bot'].map(name => name.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&')).join('|')
+      const directed = new RegExp('(?:向|给|对|找|问|回复|约)\\s*(' + names + '|QQ\\s*[1-9]\\d*)', 'gi')
+      return modelEvidence(parsed, {
+        scores, allowedKeys: ['total', ...c.dimensions.map(d => d.key)], sources: sources.visible, noteLimit,
+        allowClaim(text, ids) {
+          for (const [, label] of text.matchAll(directed)) {
+            const qq = /^QQ/i.test(label) ? label.slice(2).trim() : String(bot || '')
+            if (!qq || !ids.every(id => {
+              const row = sources.visible.get(id)
+              if (row?.chatId === 'private:' + ref.userId && row.uid === ref.userId) return qq === String(bot)
+              return row?.atQQs?.includes(qq) || row?.replyToQQ === qq
+            })) return false
+          }
+          return true
+        },
+      })
     }
 
     async function generateRecordNow (ref, chatId, existing) {
       const c = conf()
       const parsedExisting = existing || store.get(ref.personId)
+      const baselineId = parsedExisting ? cardSourceId(parsedExisting) : ''
       const sources = newSources()
-      const memory = await memoryBlock(ref, chatId, sources)
+      const memory = memoryBlock(ref, chatId, sources)
       const recent = recentMaterialText(ref, chatId, c.recentMessages, sources) || '（无）'
       const stamp = sourceStamp(ref, sources)
+      const current = () => checkMaterial(ref, chatId, sources, stamp, baselineId)
+      const noEvidence = !sources.visible.size
+      current()
+      if (noEvidence && parsedExisting) throw new Error('没有可核验的本人来源，原档案保持不变。')
       const prompt = buildColdStartPrompt({
         persona: persona(),
         nickname: c.botName,
@@ -515,38 +526,28 @@ export default {
         memoryBlock: memory,
         recentChat: recent,
         refreshGuidance: parsedExisting ? DEFAULT_PROMPTS.refreshGuidance : '',
-        existingBlock: existingBlock(parsedExisting, c),
         sizeLimit: c.noteSizeLimit,
       })
-      let generated = null
-      const noEvidence = memory === '（无）' && recent === '（无）'
-      try {
-        if (!noEvidence) generated = await askWithPerspective(ref, c, prompt, 1400, hasGroupMaterial(ref, recent, memory))
-      } catch (error) {
-        if (/接收对象|视角/.test(error?.message || '')) throw error
-        log.warn('印象生成失败（' + (parsedExisting ? '刷新' : '冷启动') + '）：' + (error && error.message ? error.message : error))
-      }
-      const parsed = noEvidence ? { total: c.defaultScore, scores: Object.fromEntries(c.dimensions.map(d => [d.key, c.defaultScore])), description: '还没积累足够关于这个人的本人聊天记录，暂时不评价具体经历。' } : generated
-      if (!parsed || typeof parsed.description !== 'string' || !parsed.description.trim()) throw new Error('模型没有返回有效简介，原档案保持不变。')
-      checkMaterial(ref, sources, stamp)
+      const generated = noEvidence ? { description: '', claims: [], values: {}, scoreSources: {} } :
+        await askWithPerspective(ref, c, prompt, 2200, [...sources.scopes].some(s => s.startsWith('group:')),
+          parsed => asCited(ref, parsed, { ...parsed?.scores, total: parsed?.total }, c, sources), current)
+      if (!generated) throw new Error('模型没有返回有效 JSON，原档案保持不变。')
+      if (parsedExisting && !generated.claims.length && !Object.keys(generated.values).length) throw new Error('模型没有给出带可核验来源的笔记或评分，原档案保持不变。')
+      current()
       const record = parsedExisting
-        ? { ...parsedExisting, scores: { ...(parsedExisting.scores || {}) } }
+        ? { ...parsedExisting, scores: {}, total: c.defaultScore, description: '' }
         : newRecordFor(ref, c)
-      // 旧规则的错误叙事也可能影响旧分；模型漏回维度时不能把旧值重新认证为v2。
-      if (parsedExisting && parsedExisting.materialVersion !== 2) {
-        record.total = c.defaultScore
-        record.scores = Object.fromEntries(c.dimensions.map(d => [d.key, c.defaultScore]))
-        record.description = ''
-      }
+      const { total, ...scores } = generated.values
+      const parsed = { total, scores, description: generated.description || '还没积累足够可核验的本人材料，暂时不评价具体经历。' }
       applyGeneration(record, parsed, { dimensions: c.dimensions, defaultScore: c.defaultScore, descriptionLimit: c.noteSizeLimit })
-      record.updatedAt = Date.now()
-      record.materialVersion = 2
-      Object.assign(record, { sourceScopes: [...sources.scopes], sourceIds: sourceRecord(ref, sources).sourceIds })
+      Object.assign(record, sourceRecord(ref, sources), { evidence: { claims: generated.claims,
+        scores: Object.fromEntries(Object.entries(generated.scoreSources).map(([key, sourceIds]) => [key,{ kind: 'score', sourceIds }])),
+        noteUnverified: false } })
       completeness(record, c)
       identity.remember(record, ref)
       store.upsert(record)
       store.saveNow()
-      if (parsed) log.info('已为 ' + ref.displayName + (parsedExisting ? ' 刷新印象' : ' 建立印象档案'))
+      log.info('已为 ' + ref.displayName + (parsedExisting ? ' 刷新印象' : ' 建立印象档案'))
       return record
     }
 
@@ -557,6 +558,9 @@ export default {
         if (!Number.isFinite(Number(record.scores[d.key]))) record.scores[d.key] = c.defaultScore
       }
       return record
+    }
+    function editableEvidence(record) {
+      return normalizeEvidence(record.evidence) || { claims: [], scores: Object.create(null), noteUnverified: Boolean(record.description) }
     }
 
     async function ensureRecord (ref, chatId) {
@@ -613,6 +617,8 @@ export default {
       }
       if (dim.key === 'total') record.total = newValue
       else record.scores[dim.key] = newValue
+      record.evidence = editableEvidence(record)
+      record.evidence.scores[dim.key] = { kind: 'manual', sourceIds: [] }
       record.updatedAt = Date.now()
       store.upsert(record)
       store.saveNow()
@@ -688,7 +694,7 @@ export default {
       if (!text) return ''
       // Management can still render an archived card locally. Never send its
       // unverifiable prose to a compaction model just to preview the archive.
-      if (!coreContext.recordCurrent(record)) return truncateText(text, c.noteSizeLimit, 'chars')
+      if (!coreContext.recordCurrent(record) || record.evidence) return truncateText(text, c.noteSizeLimit, 'chars')
       if (!c.persistentNote) return text.length <= c.noteSizeLimit ? text : truncateText(text, c.noteSizeLimit, 'chars')
       if (text.length <= c.noteSizeLimit) return text
       const key = ref.personId + '|' + c.noteSizeLimit + '|' + text.length + '|' + text.slice(0, 40)
@@ -804,11 +810,12 @@ export default {
         fileBase: safeBase(ref) + '-' + Date.now().toString(36),
         format: c.format,
         scale: c.cardScale,
+        includeImage: o.includeImage === true,
       })
       if (!result.ok) return { ok: false, error: result.error || '渲染失败', svg }
       renderCount++
       if (renderCount % 20 === 0) await pruneCards(api.dataDir('cards'))
-      return { ok: true, file: result.file, bytes: result.bytes, svg }
+      return { ok: true, file: result.file, bytes: result.bytes, svg, ...(o.includeImage ? { image: result.image } : {}) }
     }
 
     async function sendCard (chatId, ref, opts) {
@@ -832,15 +839,16 @@ export default {
       if (!coreContext.scopeAllowed(chatId) || !coreContext.recordCurrent(record)) return { ok: false, message: '档案来源不可验证或授权已撤销，请先刷新印象。', record }
       completeness(record, c)
       const sourceId = cardSourceId(record)
-      const out = await renderCard(record, ref, { radarTopN: o.radarTopN, chatId })
+      const out = await renderCard(record, ref, { radarTopN: o.radarTopN, chatId, includeImage: true })
       const current = store.get(record.id)
       if (!coreContext.scopeAllowed(chatId) || !coreContext.recordCurrent(current) || cardSourceId(current) !== sourceId) return { ok: false, message: '渲染期间档案来源已改变或被撤销，本次不发送。' }
       if (out.ok) {
         try {
-          const sent = await api.sendImage(chatId, out.file)
+          if (!Buffer.isBuffer(out.image) || !out.image.length) throw new Error('渲染器未返回卡片图片')
+          const sent = await api.sendSegments(chatId, [{ type: 'image', data: { file: 'base64://' + out.image.toString('base64') } }], '[印象卡片]')
           // 核心的出站语义：被主动发言策略拦下 / 试运行 / 真失败都会返回 null 而不抛。
           if (!sent) {
-            log.warn('卡片没发出去：sendImage 返回空（可能被策略拦下或在试运行）')
+            log.warn('卡片没发出去：发送未确认（可能被策略拦下或在试运行）')
             return { ok: false, message: '卡片画好了，但没发出去（可能被主动发言策略拦下，或在试运行）。', record }
           }
           return { ok: true, file: out.file, record, message: '卡片已发送' }
@@ -876,9 +884,11 @@ export default {
         const sources = newSources()
         ;(existing.sourceScopes || [scopeOf(existing.id)?.scope]).filter(Boolean).forEach(s => sources.scopes.add(s))
         ;(existing.sourceIds || []).forEach(id => sources.ids.add(id))
-        completeness(existing, c)
+        ;(existing.inputs || []).forEach(input => sources.inputs.set(input.id, input))
+        const baselineId = cardSourceId(existing)
         const recent = recentMaterialText(ref, chatId, c.lightRecentLimit, sources)
         const stamp = sourceStamp(ref, sources)
+        const current = () => checkMaterial(ref, chatId, sources, stamp, baselineId)
         if (!recent) return { ok: false, message: '最近没有可以看的聊天记录。' }
         const ignore = shouldIgnoreNudgeDescription({
           persistentImpression: c.persistentNote,
@@ -886,11 +896,8 @@ export default {
           sizeLimit: c.noteSizeLimit,
         })
         const notePolicy = ignore
-          ? '【笔记策略】当前笔记长于卡面上限，这是持久印象期刊。禁止返回 description（或返回也会被忽略）。只调整 deltas。'
-          : '【笔记策略】可以返回微调后的完整笔记，或省略以保留。'
-        const currentNote = ignore
-          ? (existing.description ? existing.description.slice(0, c.noteSizeLimit) + '…' : '（无）')
-          : (existing.description || '（无）')
+          ? '【笔记策略】现有笔记较长，只能按本轮材料调整 deltas；请留空 claims。'
+          : '【笔记策略】只添加由本轮材料支持的新印象；留空 claims 即保留原笔记。'
         const prompt = buildNudgePrompt({
           persona: persona(),
           nickname: c.botName,
@@ -901,24 +908,35 @@ export default {
           defaultScore: c.defaultScore,
           dimensions: c.dimensions,
           currentScoresBlock: buildCurrentScores(existing, { dimensions: c.dimensions, totalLabel: c.totalLabel, defaultScore: c.defaultScore }),
-          currentNote,
           notePolicy,
           personIdentities: personIdentities(ref),
           recentChat: recent,
           sizeLimit: c.noteSizeLimit,
         })
-        let parsed
+        let cited
         try {
-          parsed = await askWithPerspective(ref, c, prompt, 800, hasGroupMaterial(ref, recent))
+          cited = await askWithPerspective(ref, c, prompt, 1200, [...sources.scopes].some(s => s.startsWith('group:')),
+            parsed => asCited(ref, parsed, parsed?.deltas, c, sources, ignore ? 0 : c.noteSizeLimit), current)
         } catch (error) {
           return { ok: false, message: '微调调用模型失败：' + (error && error.message ? error.message : error) }
         }
-        if (!parsed) return { ok: false, message: '模型没给出有效 JSON，档案保持不变。' }
+        if (!cited) return { ok: false, message: '模型没给出有效 JSON，档案保持不变。' }
         const allowed = new Set(['total', ...c.dimensions.map((d) => d.key)])
-        const { deltas, description } = parseNudgePayload(parsed, { allowedKeys: allowed, maxAbsDelta: c.lightMaxAbsDelta })
-        const result = applyNudge(existing, deltas, description, { ignoreDescription: ignore, defaultScore: c.defaultScore, descriptionLimit: c.noteSizeLimit })
-        checkMaterial(ref, sources, stamp)
-        Object.assign(result.record, { sourceScopes: [...sources.scopes], sourceIds: [...sources.ids] })
+        const { deltas } = parseNudgePayload({ deltas: cited.values }, { allowedKeys: allowed, maxAbsDelta: c.lightMaxAbsDelta })
+        const before = String(existing.description || '')
+        const oldEvidence = editableEvidence(existing)
+        const claims = cited.claims.filter(claim => !oldEvidence.claims.some(old => old.text === claim.text))
+        const note = claims.map(claim => claim.text).join('\n')
+        const description = note ? [before, note].filter(Boolean).join('\n') : ''
+        const descriptionLimit = c.persistentNote ? MAX_DESCRIPTION_CHARS : c.noteSizeLimit
+        const descriptionFits = Array.from(description).length <= descriptionLimit
+        current()
+        const result = applyNudge({ ...existing, scores: { ...existing.scores } }, deltas, description,
+          { ignoreDescription: ignore || !descriptionFits, defaultScore: c.defaultScore, descriptionLimit })
+        if (!result.applied.length && !result.noteChanged) return { ok: true, applied: [], noteChanged: false, record: existing, message: '这次没什么变化' }
+        if (result.noteChanged) oldEvidence.claims.push(...claims)
+        for (const item of result.applied) oldEvidence.scores[item.key] = { kind: 'delta', delta: item.delta, sourceIds: cited.scoreSources[item.key] }
+        Object.assign(result.record, sourceRecord(ref, sources), { evidence: oldEvidence })
         completeness(result.record, c)
         result.record.updatedAt = Date.now()
         identity.remember(result.record, ref)
@@ -1298,6 +1316,8 @@ export default {
           completeness(record, c)
           identity.remember(record, found.ref)
           const base = String(record.description || '').trim()
+          record.evidence = editableEvidence(record)
+          record.evidence.noteUnverified = true
           record.description = truncateText((base ? base + '\n' : '') + text, MAX_DESCRIPTION_CHARS, 'chars')
           record.updatedAt = Date.now()
           store.upsert(record)
@@ -1321,6 +1341,9 @@ export default {
           const record = store.get(found.ref.personId) || newRecordFor(found.ref, c)
           completeness(record, c)
           identity.remember(record, found.ref)
+          record.evidence = editableEvidence(record)
+          record.evidence.claims = []
+          record.evidence.noteUnverified = true
           record.description = text
           record.updatedAt = Date.now()
           store.upsert(record)
@@ -1536,6 +1559,33 @@ export default {
       }
     })
 
+    api.route('/evidence', async (req) => {
+      const guard = routeGuard(req, true)
+      if (guard) return guard
+      const body = await api.core.http.body(req)
+      const record = store.get(String(body?.personId || ''))
+      if (!record) return { ok: false, message: '还没有这个人的档案。' }
+      if (!coreContext.recordCurrent(record)) return { ok: false, message: '当前档案的来源不可核验或已撤权。' }
+      const evidence = editableEvidence(record)
+      const citeIds = new Set([...evidence.claims, ...Object.values(evidence.scores)].flatMap(entry => entry.sourceIds))
+      const scope = scopeOf(record.id)?.scope
+      const inputs = (record.inputs || []).filter(input => citeIds.has(input.id))
+      const rawIds = inputs.filter(input => input.id.startsWith('vault:')).map(input => input.id)
+      const rawRows = rawIds.length ? (api.use('history-vault')?.impressionMaterialByIds?.(rawIds,{ userId: record.userId, scope }) || []) : []
+      const memoryIds = new Set(inputs.filter(input => exactMemoryId(input.id)).map(input => input.id))
+      const memories = memoryIds.size ? (api.use('memory')?.list?.() || []).filter(item => memoryIds.has(item.contextSourceId)) : []
+      const byId = new Map(rawRows.map(row => [row.id, row])), byMemoryId = new Map(memories.map(item => [item.contextSourceId, item]))
+      const sources = inputs.flatMap(input => {
+        const row = byId.get(input.id)
+        if (row) return [{ id: input.id, chatId: input.chatId, kind: 'dialogue', speakerQQ: row.uid, messageId: row.messageId,
+          at: row.t || null, recipient: recipientLabel({ ...row, replyToQQ: input.replyToQQ }, api.config().botQQ),
+          text: row.text.slice(0, 300) }]
+        const item = byMemoryId.get(input.id)
+        return item ? [{ id: input.id, chatId: input.chatId, kind: 'memory', text: String(item.text).slice(0, 300) }] : []
+      })
+      return { ok: true, ...evidence, sources }
+    })
+
     api.route('/card.png', async (req, res) => {
       const guard = routeGuard(req)
       if (guard) {
@@ -1596,8 +1646,12 @@ export default {
       const ref = identity.refFromRecord(record)
       if (!scopeOf(record.id)) return { ok: false, message: '旧版共用档案仅归档。请在对应群或本人私聊里重新建立卡片。' }
       const chatId = materialChat(ref)
-      const updated = await refreshRecord(ref, chatId)
-      return { ok: true, message: '已刷新 ' + ref.displayName + ' 的印象。', person: personPayload(updated) }
+      try {
+        const updated = await refreshRecord(ref, chatId)
+        return { ok: true, message: '已刷新 ' + ref.displayName + ' 的印象。', person: personPayload(updated) }
+      } catch (error) {
+        return { ok: false, message: error.message }
+      }
     })
 
     api.route('/adjust', async (req) => {

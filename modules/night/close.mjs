@@ -78,10 +78,13 @@ export function isClosing(text, cfg = {}) {
   return [false, '', '']
 }
 
-/** 这次收线该静默多久（分钟）。0 表示要睡到起床时间。 */
-export function closeMinutes(cfg = {}, strength = '', word = '') {
-  if (strength === 'strong') return 0
-  if (['午', '眯', '盹', '躺'].some((m) => word.includes(m))) return Math.max(1, Number(cfg.noonMuteMinutes) || 75)
+export function closeKind(word) {
+  return /[午眯盹躺]/.test(word) ? 'noon' : 'night'
+}
+
+/** 单会话静默时长；宿主把 0 解释为永久静默。 */
+export function closeMinutes(cfg, kind) {
+  if (kind === 'noon') return Math.max(1, Number(cfg.noonMuteMinutes) || 75)
   return Math.max(1, Number(cfg.byeMuteMinutes) || 30)
 }
 

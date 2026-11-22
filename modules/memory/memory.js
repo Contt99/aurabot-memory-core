@@ -1312,19 +1312,26 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, onForge
       return Boolean(found && coreVisible(found, chatId))
     })
   }
-  function contextForCore({ chat, sessionId = '', query = '', prevText = '', speakers = [], maxChars = 900 } = {}) {
-    const chatId = String(chat?.chatId || ''), empty = { text: '', sourceIds: [] }
-    if (!coreChatAllowed(chatId) || (chat?.kind !== 'group' && chat?.kind !== 'private') || parseMemoryCommand(query)?.action === 'forget') return empty
+  function coreFactScope({ chat, sessionId = '', query = '', speakers = [] } = {}) {
+    const chatId = String(chat?.chatId || '')
+    if (!coreChatAllowed(chatId) || (chat?.kind !== 'group' && chat?.kind !== 'private') || parseMemoryCommand(query)?.action === 'forget') return null
     const owner = String(getConfig().ownerQQ || ''), ownerPrivate = chatId === 'private:' + owner
     const people = chat.kind === 'private' ? [String(chat.userId || chatId.slice(8))] : (speakers.length ? speakers : hub?.speakersOf?.(sessionId) || []).map(String).filter(qq => qq !== owner)
     const pool = load().items.filter(m => coreVisible(m, chatId))
+    return {pool, people, searchOptions:{ about: people, onlyAbout: ownerPrivate ? undefined : people, requireAbout: !ownerPrivate,
+      ownerScope: ownerPrivate, scopeChatId: chatId, groupChatId: chat.kind === 'group' ? chatId : '', includeGroup: ownerPrivate, period: null, limit: 6 }}
+  }
+  function renderCoreFacts(scope, { query = '', prevText = '', maxChars = 900 } = {}, vectorHits = []) {
+    if (!scope) return { text: '', sourceIds: [], vectorUsed: false }
+    const {pool, people, searchOptions} = scope
     const q = [query, String(query).length < 12 ? prevText : ''].filter(Boolean).join(' ')
-    const hits = q ? search(buildIndex(pool), q, { about: people, onlyAbout: ownerPrivate ? undefined : people, requireAbout: !ownerPrivate,
-      ownerScope: ownerPrivate, scopeChatId: chatId, groupChatId: chat.kind === 'group' ? chatId : '', includeGroup: ownerPrivate, period: null, limit: 6 }).map(h => h.it) : []
+    const hits = q ? search(buildIndex(pool), q, { ...searchOptions, vectorHits }) : []
+    const semantic = new Set(vectorHits.map(h => h.id))
     const resident = pool.filter(m => people.includes(String(m.about || ''))).sort((a,b) => Number(b.at || 0) - Number(a.at || 0)).slice(0, 6)
     const cap = Math.min(900, Math.max(0, Math.floor(Number(maxChars) || 0))), lines = [], sourceIds = []
+    let vectorUsed = false
     const date = at => new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai',dateStyle:'short'}).format(Number(at))
-    for (const m of [...new Map([...hits,...resident].map(m => [m.id,m])).values()]) {
+    for (const m of new Map([...hits.map(h => h.it), ...resident].map(m => [m.id,m])).values()) {
       const id = coreSourceId(m), known = m.sourceTimeKnown === true || (m.sourceTimeKnown !== false && !['panel','import','tool','abstract'].includes(m.source))
       const when = known && Number(m.saidAt) > 0 ? '原时' + date(m.saidAt) : '原事时间未知'
       const stamp = Number(m.at) > 0 ? '；记于' + date(m.at) : ''
@@ -1332,8 +1339,47 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, onForge
       const room = cap - lines.join('\n').length - (lines.length ? 1 : 0)
       if (room <= head.length) continue
       lines.push(head + String(m.text || '').slice(0, room - head.length)); sourceIds.push(id)
+      if (semantic.has(m.id)) vectorUsed = true
     }
-    return { text: lines.join('\n'), sourceIds }
+    return { text: lines.join('\n'), sourceIds, vectorUsed }
+  }
+  function contextForCore(options = {}) {
+    const {text, sourceIds} = renderCoreFacts(coreFactScope(options), options)
+    return {text, sourceIds}
+  }
+
+  function coreVectorPool(scope) {
+    if (!scope) return []
+    const {ownerScope, scopeChatId, groupChatId} = scope.searchOptions
+    return scope.pool.filter(m => m.scope === 'group'
+      ? getConfig().memory.groupMemory !== false && !m.about && String(m.chatId || '').startsWith('group:') && (ownerScope || m.chatId === groupChatId)
+      : ownerScope || m.chatId === scopeChatId && scope.people.includes(String(m.about || '')) && Boolean(m.about))
+  }
+
+  /** Async enrichment for ordinary QQ prompts. The old synchronous provider stays lexical. */
+  async function contextForCoreRecall(options = {}) {
+    const q = String(options.query || '').trim()
+    const lexical = reason => ({ ...contextForCore(options), recall: {mode:'lexical', reason} })
+    const mode = () => !getConfig().memory.vector?.enabled ? 'vector-disabled' : !shouldAutoRecall(q) ? 'trigger-required' : ''
+    if (!q) return lexical('no-query')
+    if (q.split(/\r?\n/).some(line => parseMemoryCommand(line)?.action === 'forget')) return lexical('forget-command')
+    const initialMode = mode()
+    if (initialMode) return lexical(initialMode)
+    const candidates = coreVectorPool(coreFactScope(options)), indexed = new Set(vector.validIds(candidates))
+    if (!indexed.size) return lexical('no-index')
+    const before = new Map(candidates.filter(m=>indexed.has(m.id)).map(m=>[m.id,coreMaterial(m)]))
+    // One bounded request using current user text only. The existing query timeout,
+    // cache, and failure cooldown apply; previous turn text stays local.
+    const vec = await vector.queryVector(q.slice(-600))
+    if (!vec) return lexical('embedding-unavailable')
+    const currentMode = mode()
+    if (currentMode) return lexical(currentMode)
+    const scope = coreFactScope(options)
+    const ids = vector.validIds(coreVectorPool(scope).filter(m=>before.get(m.id)===coreMaterial(m)))
+    if (!ids.length) return lexical('source-changed')
+    const vectorHits = vector.search(vec, ids, ids.length).filter(hit => hit.similarity >= 0.55)
+    const {text, sourceIds, vectorUsed} = renderCoreFacts(scope, options, vectorHits)
+    return {text, sourceIds, recall:vectorUsed ? {mode:'hybrid'} : {mode:'lexical', reason:'no-eligible-hit'}}
   }
 
   /** 给系统提示词上下文用：人物小档案 + 相处经验（常驻）+ 按这一轮对方说的话检索到的记忆。 */
@@ -2790,7 +2836,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, onForge
   }
 
   return {
-    contextForCore, contextCurrent, noteVia, contextVia, recallHint, handleCommand, vectorHits, shouldAutoRecall,
+    contextForCore, contextForCoreRecall, contextCurrent, noteVia, contextVia, recallHint, handleCommand, vectorHits, shouldAutoRecall,
     add, addEvent, recentEvents, update, remove, restore, recall, contextFor, consolidate, tick, topicScore, compressDetails, importCandidates, importCommit,
     personaOverview, personaPerson, savePersonaPerson, personTags, dislikes, chats, saveChat, gists, timeline, deleteGist, saveRelation, deleteRelation, lookupPerson, lookupChat,
     profiles: () => { const s = load(); return Object.entries(s.profiles || {}).map(([qq, p]) => ({ qq, ...p })).sort((a, b) => b.at - a.at) },

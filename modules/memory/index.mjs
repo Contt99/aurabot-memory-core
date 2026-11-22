@@ -11,7 +11,7 @@ const { defineTool, str } = __lib('tools/tools.js')
 export default {
   id: 'memory',
   name: '记忆',
-  version: '1.0.3-local.life',
+  version: '1.0.3-local.life.1',
   description: '长期记忆：记事、想起、每日整理、小档案和相处经验',
   tab: 'mood',
   files: ['features/memory.js', 'features/memory-store.js', 'features/memory-vector.js'],

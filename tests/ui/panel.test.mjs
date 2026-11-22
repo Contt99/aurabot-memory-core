@@ -27,6 +27,16 @@ function mount(overrides={}) {
  return{settle,calls,text:()=>textOf(tree),nodes,find,click:async label=>{const n=find('button',label);assert.ok(!n.props.disabled,'button enabled: '+label);n.props.onClick({preventDefault(){}});await settle()},change:async(label,value)=>{const n=nodes().find(n=>n.props['aria-label']===label);assert.ok(n,'missing input '+label);n.props.onChange({target:{value}});await settle()},submit:async()=>{find('form','提交纠错').props.onSubmit({preventDefault(){}});await settle()}}
 }
 test('preserves existing experience, notes and telemetry tabs',async()=>{const ui=mount();await ui.settle();assert.match(ui.text(),/旧经历/);await ui.click('探索笔记');assert.match(ui.text(),/旧笔记/);await ui.click('运行与用量');assert.match(ui.text(),/调用 3 次/);assert.match(ui.text(),/2026\/11\/17 01:00:00/);assert.match(ui.text(),/Asia\/Shanghai/)})
+test('ordinary chat recall reports lexical fallback and its reason in the snapshot and metrics',async()=>{
+ const f=fixtures['/memory/context'].snapshot,reason='embedding-unavailable'
+ const ui=mount({'/memory/context':{ok:true,snapshot:{...f,data:{...f.data,memoryRecall:{mode:'lexical',reason}}}},'/telemetry':{...fixtures['/telemetry'],decisions:[{stage:'memory-recall',status:'hybrid',at},{stage:'memory-recall',status:'lexical',reason,at}]}})
+ await ui.settle();await ui.click('上下文诊断');await ui.click('查看材料')
+ assert.match(ui.text(),/精选事实回忆：关键词检索.*向量服务失败或超时/)
+ await ui.click('运行与用量')
+ assert.match(ui.text(),/精选事实回忆 · 语义与关键词混合检索/)
+ assert.match(ui.text(),/精选事实回忆 · 关键词检索/)
+ assert.match(ui.text(),/向量服务失败或超时/)
+})
 test('timeline keeps unknown occurrence separate from observation and record times',async()=>{const ui=mount();await ui.settle();await ui.click('记忆时间线');assert.match(ui.text(),/发生时间未知/);assert.match(ui.text(),/观察于.*2026\/11\/17 01:00:00/);assert.match(ui.text(),/记于.*2026\/11\/17 01:00:00/);assert.doesNotMatch(ui.text(),/1970/);assert.match(ui.text(),/vault:1/);await ui.change('聊天筛选','private:123');assert.equal(ui.calls.filter(c=>c.path==='/memory/timeline').length,1);await ui.click('应用筛选');assert.equal(ui.calls.at(-1).query.get('chatId'),'private:123')})
 test('context distinguishes prepared material from actual request visibility',async()=>{const ui=mount();await ui.settle();await ui.click('上下文诊断');assert.match(ui.text(),/仅准备/);await ui.click('查看材料');assert.match(ui.text(),/本轮准备的材料/);assert.match(ui.text(),/尚无请求可见回执/);assert.match(ui.text(),/vault:1/);assert.match(ui.text(),/6000/);assert.equal(ui.calls.find(c=>c.path==='/memory/context').query.get('id'),'snap:1')})
 test('observed sources are listed separately from prepared candidates even when the request fails',async()=>{

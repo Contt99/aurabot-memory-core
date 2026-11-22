@@ -58,13 +58,14 @@ const DEFAULT_COLD_START_PROMPT_TEMPLATE = `你是印象卡片模块，是名为
 {memory_block}
 - 最近的聊天记录：
   - 你是群聊的观察者，不默认是发言的接收对象。只评价目标QQ本人的材料。
-  - 接收对象以原始@/回复元信息为准；旧流水缺失元信息时一律未知，不能从正文、相邻话题或昵称猜测。
+  - 接收对象以该条证据自己的原始@/回复元信息为准；缺失就写未知，不能从正文、相邻话题或昵称猜测。
 {recent_chat}
 {refresh_guidance}{existing_block}
 请只输出一个 JSON 对象（不要输出任何额外文字、解释或代码块标记），格式如下：
-{"total": 数字, "scores": {{scores_keys_doc}}, "description": "用你的口吻写的人物简介，{size_limit}字以内"}`
+{"total": 数字, "scores": {"维度key": 数字}, "claims": [{"text":"一句独立的人物印象", "sourceIds":["vault:42"]}], "scoreSources": {"total":["vault:42"],"维度key":["vault:42"]}}
+示例 ID 不能照抄，请用上方真实 ID。每条印象只写一个有依据的判断，并列出直接支持该判断的 ID；注明自述、观察或主观感受，不把转述写成本人经历。所有印象合计 {size_limit} 字以内。任何非默认分必须在 scoreSources 中引用直接相关的证据；依据不够就省略分数或文字。\n`
 
-const DEFAULT_REFRESH_GUIDANCE = `【刷新评估】这是一次全面重算，不是微调旧分。请优先依据「印象记忆」与「最近聊天记录」重新判断你对 ta 的真实感受；下方旧档案仅供参考，各项分数与简介都可以明显上升或下降，不要惯性膨胀，也不要死守先入为主的旧印象。`
+const DEFAULT_REFRESH_GUIDANCE = `【刷新评估】这是一次全面重算，不是微调旧分。只依据本轮列出的来源重新评估；旧档案不是这次的证据。`
 
 // 轻量微调只收相对变化，避免模型把整张卡重写一遍。
 const DEFAULT_LIGHT_REFRESH_PROMPT_TEMPLATE = `你是印象卡片模块，是名为「{nickname}」的人工智能生命体的一部分。
@@ -79,8 +80,6 @@ const DEFAULT_LIGHT_REFRESH_PROMPT_TEMPLATE = `你是印象卡片模块，是名
 
 当前档案（这是基准，请在此上加减）：
 {current_scores_block}
-当前印象笔记：
-{current_note}
 {note_policy}
 关于这个人：
 {person_identities}
@@ -89,8 +88,8 @@ const DEFAULT_LIGHT_REFRESH_PROMPT_TEMPLATE = `你是印象卡片模块，是名
 {recent_chat}
 
 请只输出一个 JSON 对象（不要额外文字或代码块标记）：
-{"deltas": {"total": 数字, "维度key": 数字}, "description": "可选；省略或空字符串表示保留原笔记。若要改笔记，请在原文基础上微调，不要另起炉灶。{size_limit}字以内"}
-deltas 里只放需要改的 key（含 total）。`
+{"deltas":{"total":数字,"维度key":数字}, "claims":[{"text":"一句新的独立印象","sourceIds":["vault:42"]}], "scoreSources":{"total":["vault:42"],"维度key":["vault:42"]}}
+示例 ID 不能照抄。每条新印象、每项加减分仅引用上方直接支持它的真实来源 ID。deltas 里只放需要改的 key；没有依据就省略。新印象合计 {size_limit} 字以内。`
 
 // 主动提醒 / 加减分播报用的系统通知模板。
 const DEFAULT_NOTIFY_TEMPLATE = `━━━━━━━━━━━━━━

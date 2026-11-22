@@ -10,7 +10,7 @@
 // 醒后的「爬楼」只记会话清单，不生成爬楼语；梦的正文只留在本模块的私人记录里，
 // 不进共享记忆，避免私人内容进到群聊上下文。
 
-import { isClosing, closeMinutes, isAskingMe } from './close.mjs'
+import { isClosing, closeKind, closeMinutes, isAskingMe } from './close.mjs'
 import { configureClock, wall } from './clock.mjs'
 import { createLullaby, isFarewell } from './lullaby.mjs'
 import { Dreamer } from './dream.mjs'
@@ -20,6 +20,7 @@ import * as energy from './energy.mjs'
 import * as stages from './stages.mjs'
 import { currentOwner, ownerPrivateChat, ownerToolCall } from './privacy.mjs'
 
+const VERSION = '1.0.3-local.sleep.1'
 const DEFAULTS = {
   enabled: true,
   wakeTime: '08:00',
@@ -50,6 +51,7 @@ const DEFAULTS = {
   stageNoonLightOnly: true,
 
   dreamEnabled: true,
+  dreamAutoEnabled: true,
   dreamInRemOnly: true,
   dreamStartAfterMinutes: 60,
   dreamIntervalMinutes: 60,
@@ -101,7 +103,8 @@ const SETTINGS = [
   { key: 'stageDeepMaxMinutes', label: '首个周期深睡上限（分钟）', type: 'number' },
   { key: 'stageRemMaxMinutes', label: 'REM 上限（分钟）', type: 'number' },
 
-  { key: 'dreamEnabled', label: '做梦', type: 'switch' },
+  { key: 'dreamEnabled', label: '允许做梦', type: 'switch' },
+  { key: 'dreamAutoEnabled', label: '睡着后自动做梦', type: 'switch' },
   { key: 'dreamInRemOnly', label: '只在 REM 阶段做梦', type: 'switch' },
   { key: 'dreamStartAfterMinutes', label: '入睡多久后开始做梦', type: 'number' },
   { key: 'dreamIntervalMinutes', label: '两段梦最短间隔', type: 'number' },
@@ -123,11 +126,11 @@ const SETTINGS = [
   { key: 'farewellUseLlm', label: '道别用模型生成（更自然，费 token）', type: 'switch' },
 
   { key: 'closeEnabled', label: '识别对方收线', type: 'switch' },
-  { key: 'closeSleepStrength', label: '什么强度才真睡', type: 'select', options: [
+  { key: 'closeSleepStrength', label: '疲劳时段内，主人私聊收线的入睡门槛', type: 'select', options: [
     { label: '只有「晚安 / 我睡了」这种强收线', value: 'strong' },
     { label: '强收线和中收线（拜拜 / 先这样）都睡', value: 'medium' },
   ] },
-  { key: 'byeMuteMinutes', label: '中/弱收线后闭嘴多久（分钟）', type: 'number' },
+  { key: 'byeMuteMinutes', label: '其他会话收线后闭嘴多久（分钟）', type: 'number' },
   { key: 'noonMuteMinutes', label: '午睡收线后闭嘴多久（分钟）', type: 'number' },
 
   { key: 'morningGreeting', label: '自然醒后给主人发早安', type: 'switch' },
@@ -174,6 +177,7 @@ function cfgOf(api) {
     stageNoonLightOnly: b('stageNoonLightOnly', DEFAULTS.stageNoonLightOnly),
 
     dreamEnabled: b('dreamEnabled', DEFAULTS.dreamEnabled),
+    dreamAutoEnabled: b('dreamAutoEnabled', DEFAULTS.dreamAutoEnabled),
     dreamInRemOnly: b('dreamInRemOnly', DEFAULTS.dreamInRemOnly),
     dreamStartAfterMinutes: n('dreamStartAfterMinutes', DEFAULTS.dreamStartAfterMinutes),
     dreamIntervalMinutes: n('dreamIntervalMinutes', DEFAULTS.dreamIntervalMinutes),
@@ -212,7 +216,7 @@ const levelStars = (level) => '★'.repeat(Math.max(1, Math.min(5, Number(level)
 export default {
   id: 'night',
   name: '长夜如梦',
-  version: '1.0.2-local.life.1',
+  version: VERSION,
   api: 1,
   description: '她会在夜里犯困、睡着、做梦，睡着时叫不一定醒；醒来记得多少，看梦有多重。',
   defaults: DEFAULTS,
@@ -310,7 +314,7 @@ export default {
     const maybeDream = async () => {
       const cfg = cfgOfFn()
       const s = service.state
-      if (!cfg.enabled || !cfg.dreamEnabled || s.mode !== ASLEEP) return
+      if (!cfg.enabled || !cfg.dreamEnabled || !cfg.dreamAutoEnabled || s.mode !== ASLEEP) return
       if (!api.use('life-core')) return
       const now = Date.now()
       const stage = service.stage(now)
@@ -329,7 +333,7 @@ export default {
       if (!cfg.enabled) return false
 
       // 主人自己在私聊里说话，就别再吊着「闭嘴」——不然一句「好」能让她沉默半小时
-      const ownerPrivate = msg.kind === 'private' && Boolean(api.isOwner?.(msg.userId))
+      const ownerPrivate = ownerPrivateChat(api, msg)
       if (ownerPrivate) {
         try {
           if (api.core?.mutes?.muted?.(msg.chatId)) api.core.mutes.clear(msg.chatId)
@@ -351,12 +355,14 @@ export default {
         const [closing, strength, word] = isClosing(msg.text, {})
         if (closing) {
           const wantSleep = strength === 'strong' || (cfg.closeSleepStrength === 'medium' && strength === 'medium')
-          if (wantSleep && cfg.allowSleep) {
-            service.requestSleep('talk', ['午', '眯', '盹', '躺'].some((m) => word.includes(m)) ? 'noon' : 'night', msg.chatId)
+          const kind = closeKind(word)
+          // 普通收线只影响当前会话；主人私聊也必须等到对应的作息时段才能收线入睡。
+          if (ownerPrivate && wantSleep && cfg.allowSleep && energy.fatigueKind(cfg) === kind) {
+            service.requestSleep('talk', kind, msg.chatId)
           } else if (!ownerPrivate && strength !== 'weak') {
             // 「嗯 / 好 / 收到」这种短答不是收线，别拿它当理由闭嘴；
             // 主人私聊更不该被静默——她不理人是最难解释的状态。
-            const minutes = closeMinutes(cfg, strength, word)
+            const minutes = closeMinutes(cfg, kind)
             try {
               api.core?.mutes?.set?.(msg.chatId, minutes)
             } catch {
@@ -642,7 +648,7 @@ export default {
       return {
       ok: true,
       id: 'night',
-      version: '1.0.2-local.life.1',
+      version: VERSION,
       mode: service.state.mode,
       energy: Math.round(service.state.energy),
       dreams: dreamer.items.length,

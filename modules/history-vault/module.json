@@ -1,7 +1,7 @@
 {
   "id": "history-vault",
   "name": "跨会话记忆",
-  "version": "0.1.6-local.life",
+  "version": "0.1.7-local.life",
   "description": "授权QQ聊天的完整原文与消息段永久留存，摘要分层读取；模型视图有界，显式忘记与清空除外",
   "category": "manage",
   "tags": [

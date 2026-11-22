@@ -1,7 +1,7 @@
 // 印象卡片的自定义面板：人物列表 + 选中详情 + 卡片预览 + 刷新 / 加减分 / 删除。
 // 这段代码是函数体，由 Aurabot 面板在受限作用域里执行，最后要 return 一个 React 组件。
 // React / h / ui / call / settings / draftSettings / setSettings / save / toast 全部来自参数，不能 import。
-// 接口（都用 call(路径, 请求体?) 调）：/state /card.png /render /refresh /adjust /delete /send。
+// 接口（都用 call(路径, 请求体?) 调）：/state /card.png /render /refresh /evidence /adjust /delete /send。
 
 const { useState, useEffect, useMemo, useCallback } = React
 
@@ -84,6 +84,7 @@ return function Panel (props) {
   const [preview, setPreview] = useState(null)
   const [imgError, setImgError] = useState('')
   const [previewError, setPreviewError] = useState('')
+  const [evidence, setEvidence] = useState(null)
   const [adjustError, setAdjustError] = useState('')
   const [askingDelete, setAskingDelete] = useState(false)
   const [helpText, setHelpText] = useState('')
@@ -110,6 +111,7 @@ return function Panel (props) {
       setState(next)
       // 每次列表刷新都换一张卡的缓存戳，避免还显示旧图
       setPreview(null)
+      setEvidence(null)
       setRev(Date.now())
       const list = Array.isArray(next.persons) ? next.persons : []
       setSelectedId(function (prev) {
@@ -181,6 +183,7 @@ return function Panel (props) {
     setPreview(null)
     setImgError('')
     setPreviewError('')
+    setEvidence(null)
     setAdjustError('')
     setAskingDelete(false)
     setShowAllDims(false)
@@ -233,6 +236,21 @@ return function Panel (props) {
       const msg = '刷新印象失败：' + ((error && error.message) || String(error))
       setPreviewError(msg)
       notify(msg)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const readEvidence = async function () {
+    if (!selected || busy) return
+    const personId = selected.id, updatedAt = selected.updatedAt
+    setBusy('evidence')
+    setEvidence(null)
+    try {
+      const result = await request('/evidence', { personId })
+      setEvidence({ ...result, personId, updatedAt })
+    } catch (error) {
+      setEvidence({ ok: false, message: String(error?.message || error), personId, updatedAt })
     } finally {
       setBusy('')
     }
@@ -458,6 +476,27 @@ return function Panel (props) {
       : h('div', { className: 'ab-flex' },
         h(ui.Btn, { small: true, kind: 'danger', onClick: function () { setAskingDelete(true) }, disabled: !!busy }, '删除档案')))
 
+  const shownEvidence = selected && evidence?.personId === selected.id && evidence.updatedAt === selected.updatedAt ? evidence : null
+  const evidenceBlock = selected && h('div', { className: 'ab-grid', style: { gap: 8 } },
+    h('div', null, h(ui.Btn, { small: true, onClick: readEvidence, disabled: !!busy }, busy === 'evidence' ? '读取来源…' : '查看依据')),
+    shownEvidence && (shownEvidence.ok ? h('div', { className: 'ab-note ab-small' },
+      shownEvidence.noteUnverified ? h('div', { className: 'ab-muted' }, '笔记含旧内容或手工编辑，下面只列已附引用的部分。') : null,
+      !shownEvidence.claims.length && !Object.keys(shownEvidence.scores).length ? h('div', null, '这份卡没有逐项可复核的引用。') : null,
+      shownEvidence.claims.length ? h('ul', null, ...shownEvidence.claims.map(function (claim, i) {
+        return h('li', { key: i }, claim.text, ' · ', claim.sourceIds.join('、'))
+      })) : null,
+      Object.keys(shownEvidence.scores).length ? h('ul', null, ...Object.entries(shownEvidence.scores).map(function ([key, item]) {
+        return h('li', { key }, dimLabelOf(cfg, key), ' · ', item.kind === 'manual' ? '手工调整' :
+          (item.kind === 'delta' ? '本次数值变化 ' + fmt1(item.delta) : '模型评分') + ' · ' + item.sourceIds.join('、'))
+      })) : null,
+      shownEvidence.sources.length ? h('ul', null, ...shownEvidence.sources.map(function (source) {
+        return h('li', { key: source.id },
+          h('div', null, source.id, ' · ', source.chatId, source.kind === 'dialogue' ? ' · QQ ' + source.speakerQQ : ' · 精选记忆'),
+          source.kind === 'dialogue' ? h('div', { className: 'ab-muted' }, source.at ? fmtTime(source.at) : '原时未知', ' · ', source.recipient) : null,
+          h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, source.text))
+      })) : null)
+      : h('div', { className: 'ab-note err' }, shownEvidence.message || '来源暂不可用。')))
+
   const detailCard = selected
     ? h(ui.Card, {
       title: (selected.name || selected.userId) + ' 的档案',
@@ -488,6 +527,7 @@ return function Panel (props) {
       h('div', null,
         h('div', { className: 'ab-small ab-muted' }, '印象笔记'),
         h('div', { className: 'ab-small' }, noteLine)),
+      evidenceBlock,
       actionsBlock))
     : h(ui.Card, { title: '档案详情' },
       h(ui.Empty, { icon: '👈', text: persons.length === 0 ? '还没有任何档案。' : '从左边选一个人查看档案。' }))
