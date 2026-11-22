@@ -51,7 +51,14 @@ export function makeHost(t,{sdk,rows=[],directory,model,items,send}) {
    dispatched.push(params.message);return {message_id:String(dispatched.length)}
   }},stickers:{},tts:{},
   hooks:{
-   prompt:(content,info)=>h.emit('prompt',content,info),
+   prompt:async(content,info)=>{
+    for(const hook of h.events.get('prompt')||[]){
+     const value=await hook(content,info)
+     if(value===null)return null
+     if(value!==undefined)content=value
+    }
+    return content
+   },
    sent:(segments,info)=>h.emit('sent',segments,info),
    send:(segments,info)=>{
     const decision=h.emit('send',segments,info)

@@ -1,1 +1,1 @@
-{"id":"image-familiar","name":"图片理解复用","version":"0.1.0-local.2","api":1,"minPluginVersion":"1.2.0","description":"同图理解复用、GIF多帧与当前聊天纠错","license":"MIT","capabilities":["filesystem","plugin-internals"]}
+{"id":"image-familiar","name":"图片理解复用","version":"0.1.0-local.3","api":1,"minPluginVersion":"1.2.0","description":"同图理解复用、GIF多帧与当前聊天收发关联","license":"MIT","capabilities":["filesystem","plugin-internals"]}

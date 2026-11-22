@@ -9,6 +9,9 @@ import {fileURLToPath,pathToFileURL} from 'node:url'
 import {harness,message} from '../core/harness.mjs'
 import {installed,chat,makeHost,modelRequest} from './host-fixture.mjs'
 import {createDiaryMedia} from '../../modules/diary/lib/modules/diary/media.js'
+import imageDefinition from '../../modules/image-familiar/index.mjs'
+import {createRequire} from 'node:module'
+import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -139,5 +142,39 @@ if(!source) {
   assert.equal(h.core.contextDetail(sid).data.memoryRecall.mode,'hybrid')
   current=false
   await assert.rejects(h.stream(decoded[0]),/失效|来源/)
+ })
+
+ test('installed hub associates confirmed image sends with the same real decoded incoming image',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'image-ack-'))
+  const requests=[],rows=[]
+  const {h,hub,dispatched}=makeHost(t,{sdk,rows,model:async req=>requests.push(req)})
+  const require=createRequire(import.meta.url)
+  const sharpPath=process.env.AURABOT_TEST_SHARP
+  // Synthetic 1×1 GIF. The optional replay path is only consumed on the host;
+  // actual media is never part of the source checkout or test output.
+  const raw=process.env.AURABOT_IMAGE_REPLAY_FILE?fs.readFileSync(process.env.AURABOT_IMAGE_REPLAY_FILE):
+   Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64')
+  const prepare=sharpPath?bytes=>prepareImage(bytes,require(sharpPath)):async()=>({identity:'verified-fixture',frames:1})
+  let recognitions=0
+  h.modules['life-core']=h.core
+  const image=imageDefinition.setup({...h.api,dataDir:(...parts)=>path.join(h.dir,'image-familiar',...parts)},
+   {prepare,identify:prepare,describe:async()=>{recognitions++;return{description:'合成视觉描述只出现一次',confidence:.9,uncertainty:'合成不确定性'}}})
+  h.modules['image-familiar']=image
+  const data=raw.toString('base64')
+  const sent=()=>hub.sendSegments(chat.chatId,[{type:'image',data:{file:'base64://'+data}}],'[图片]')
+  await sent()
+  rows.push({...message(1,'[图片]','out'),messageId:'1'})
+  rows.push({...message(2,'[图片]'),messageId:'-123'})
+  await hub.pushToSession(chat,[{type:'image',data,mediaType:'image/gif',name:'qq--123-1'}],chat.userId,{queryText:''})
+  await sent()
+  rows.push({...message(3,'[图片]','out'),messageId:'2'})
+  await hub.pushToSession(chat,[{type:'text',text:'这是不是同一张？'}],chat.userId,{queryText:'这是不是同一张？'})
+  assert.equal(recognitions,1)
+  assert.equal(dispatched.length,2)
+  assert.equal(requests.length,2)
+  const final=JSON.stringify(requests[1].messages)
+  assert.match(final,/3 次（机器人发出 2 次、收到 1 次）/)
+  assert.equal(final.split('合成视觉描述只出现一次').length,2)
+  assert.doesNotMatch(final,/\[图片\]/)
  })
 }

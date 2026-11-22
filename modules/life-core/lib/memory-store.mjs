@@ -71,7 +71,7 @@ export function createMemoryStore(db) {
    for(const item of data.items||[]) {
     if(!ids.has(item.id))continue
     const e=event(item.eventId||item.id)
-    if(chatScope)for(const source of new Set([item.id,item.eventId,...item.providerIds||[],...item.correctionSources||[]].filter(Boolean)))
+    if(chatScope)for(const source of new Set([item.id,item.eventId,...item.providerIds||[],...item.correctionSources||[],...item.mediaSourceIds||[]].filter(Boolean)))
      db.prepare('INSERT OR IGNORE INTO memory_seen_scopes VALUES(?,?)').run(source,chatScope)
     if(!e||e.invalidatedAt)continue
     db.prepare('UPDATE memory_events SET observedAt=COALESCE(observedAt,?) WHERE id=?').run(at,e.id)

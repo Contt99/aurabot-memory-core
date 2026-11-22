@@ -11,7 +11,7 @@ import {createRecall} from './lib/recall.mjs'
 import {createTelemetry} from './lib/telemetry.mjs'
 import {createContinuity} from './lib/continuity.mjs'
 
-const VERSION='0.2.0-local.3'
+const VERSION='0.2.0-local.4'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -170,9 +170,13 @@ export default {
    while(changed){changed=false;for(const r of rows)if(!ids.has(r.id)&&inputsOf(r).some(id=>ids.has(id))){ids.add(r.id);changed=true}}
    const pendingIds=!opts.exactSources&&who&&text?rows.filter(r=>r.status==='running'&&(r.meta.chatId==='private:'+who||r.meta.speaker===who||r.meta.about===who)).map(r=>r.id):[]
    if(ids.size||pendingIds.length)ledger.setKv('forget-tombstones',[...ledger.kv('forget-tombstones',[]),{qq:who,query:opts.exactSources?'':text,pendingIds,sourceIds:[...ids]}])
-   const revisions=ledger.kv('image-forget-scopes',{}),scopes=new Set([opts.chatId||opts.commandChatId||'',/^\d+$/.test(who)?'private:'+who:'',...rows.filter(r=>ids.has(r.id)).flatMap(r=>[r.meta.chatId,...(r.meta.sourceScopes||[])])].filter(s=>/^(private|group):\d+$/.test(s||'')))
-   for(const scope of scopes)revisions[scope]=(Number(revisions[scope])||0)+1
-   ledger.setKv('image-forget-scopes',revisions)
+   const revisions=ledger.kv('image-forget-scopes',{}),cutoff=ledger.kv('image-forget-at',{})
+   const affectedScopes=opts.exactSources?[]:rows.filter(r=>ids.has(r.id)).flatMap(r=>[r.meta.chatId,...(r.meta.sourceScopes||[])])
+   const scopes=new Set([opts.chatId||opts.commandChatId||'',/^\d+$/.test(who)?'private:'+who:'',...affectedScopes].filter(s=>/^(private|group):\d+$/.test(s||'')))
+   if(scopes.size){
+    for(const scope of scopes){revisions[scope]=(Number(revisions[scope])||0)+1;cutoff[scope]=now()}
+    ledger.setKv('image-forget-scopes',revisions);ledger.setKv('image-forget-at',cutoff)
+   }
    ledger.invalidate([...ids]);const errors=[]
    try{continuity?.invalidate({sourceIds:[...ids],chatId:opts.chatId||opts.commandChatId,qq:who,query:opts.exactSources?'':text})}catch(e){errors.push(e.message)}
    const notes=api.dataDir('notes')
@@ -219,6 +223,6 @@ export default {
   api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
-  return {version:VERSION,capabilities,execute,perform,propose,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0}
+  return {version:VERSION,capabilities,execute,perform,propose,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }
 }
