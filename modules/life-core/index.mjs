@@ -16,8 +16,9 @@ import {createCandidateQueue,nativeAck} from './lib/candidate-queue.mjs'
 import {createDiaryDispatch,diaryKinds,diaryTarget,isDiaryJob} from './lib/diary-dispatch.mjs'
 import {createContactDispatch,isContactJob} from './lib/contact-dispatch.mjs'
 import {actionCoverage} from './lib/coverage.mjs'
+import {createQzonePlatform} from './lib/qzone-platform.mjs'
 
-const VERSION='0.2.0-local.11'
+const VERSION='0.2.0-local.12'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -248,6 +249,9 @@ export default {
    try{
     const ready=candidates.ready()
     for(const row of ready){
+     if(row.module==='qzone-social'&&row.target.startsWith('qzone-post:')){
+      candidates.cancel(row.id,'interrupted-before-write');continue
+     }
      const job=candidateJob(row.module,row.job)
      if(diaryKinds.has(job?.kind)){
       const result=await diaryDispatch.run(row,job)
@@ -355,6 +359,7 @@ export default {
    jobFor:candidateJob,permission:candidatePermission,record:recordOutcome})
   const contactDispatch=createContactDispatch({candidates,now,active,disposed:()=>disposed,sleeping,cfg,hub:()=>api.core.hub,continuity,
    jobFor:candidateJob,canTarget:canTouch,permission:candidatePermission,context})
+  const qzonePlatform=createQzonePlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const managementGuard=req=>{
    try {
     const host=String(req?.headers?.host||''),hostname=new URL('http://'+host).hostname
@@ -388,6 +393,9 @@ export default {
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
   return {version:VERSION,capabilities,execute,perform,performEvidence,propose:request=>propose(request),queueCandidate,runDiaryCandidate,candidateSentCount:candidates.count,
+   runQzoneInteraction:qzonePlatform.run,countQzoneInteractions:qzonePlatform.countToday,
+   countQzoneSlots:at=>qzonePlatform.countToday(at,true),
+   qzoneInteractionHistory:qzonePlatform.history,
    lastContactAckAt,supportsContactJob:(module,job)=>isContactJob(module,job,'contact'),
    candidateStatus:spec=>!disposed?candidates.byKey(spec)?.status:undefined,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }

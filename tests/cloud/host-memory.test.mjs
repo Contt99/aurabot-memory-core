@@ -20,6 +20,7 @@ import {createLifeAdapter as diaryAdapter} from '../../modules/diary/life.mjs'
 import {createPrivateJournal,journalDate} from '../../modules/autonomy/lib/private-journal.mjs'
 import purposeDefinition from '../../modules/purpose/index.mjs'
 import speakupDefinition from '../../modules/speakup/index.mjs'
+import qzoneSocial from '../../modules/qzone-social/index.mjs'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -32,6 +33,58 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ for(const refuse of [false,true])test('installed OneBot adapter: Qzone timer '+(refuse?'distinguishes confirmed rejection':'settles matched provider receipts with scoped observations'),async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'qzone-platform-'))
+  const onebotLibrary=await import(pathToFileURL(path.join(source,'onebot/client.js')))
+  let clock=Date.now()
+  const {h}=makeHost(t,{sdk:{...sdk,onebot:onebotLibrary},now:()=>clock})
+  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0}
+  h.cfg.qzoneSocial={enabled:true,commentFriends:true,replyOwn:true,like:true,intervalMin:1,maxPerDay:2,friendChance:1,ownerChance:1}
+  h.modules['life-core']=h.core
+  h.api.core.modules={status:()=>[{id:'qzone-social',running:'user'}]}
+  const {createOneBotClient}=onebotLibrary
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const libs=Object.fromEntries(await Promise.all(['core/store.js','chat/reply.js'].map(async p=>[p,await import(pathToFileURL(path.join(source,p)))])))
+  const platform=[],realFetch=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{
+   assert.equal(new URL(url).host,'qzone-fixture.invalid')
+   const action=new URL(url).pathname.slice(1),input=JSON.parse(options.body),sec=Math.floor(Date.now()/1000)
+   const respond=data=>new Response(JSON.stringify({status:'ok',retcode:0,data}))
+   if(action==='get_qzone_msg_list')return respond({msglist:[{tid:'own-post-1',comment_num:1,content:'我发了纸风车。',time:sec}]})
+   if(action==='get_qzone_feeds')return respond({feeds:[{appid:311,key:'friend-post-1',nickname:'朋友',uin:12345,html:'对方做的纸风车',time:sec}]})
+   if(action==='get_qzone_msg_detail')return respond({tid:input.tid,content:'纸风车做法',comments:input.tid==='own-post-1'?
+    [{comment_id:'0',uin:12345,name:'朋友',content:'翅膀真好看',time:sec-3,
+     replies:[{comment_id:'5',uin:10002,name:'机器人',content:'谢谢！',time:sec-2},{comment_id:'9',uin:34567,name:'另一位朋友',content:'风轮也好看',time:sec-1}]}]:[]})
+   const writing=h.routes.get('/candidates')({headers:{host:'localhost'}}).items.find(r=>r.status==='sending')
+   assert.ok(writing?.sourceIds.length)
+   platform.push({action,input})
+   if(action==='like_qzone')return respond(null)
+   assert.equal(action,'comment_qzone')
+   if(refuse&&input.tid==='friend-post-1')return new Response(JSON.stringify({status:'failed',retcode:100,message:'comment denied'}))
+   return respond({comment_id:input.tid==='own-post-1'?'102':'103'})
+  }
+  t.after(()=>{globalThis.fetch=realFetch})
+  const onebot=createOneBotClient({endpoint:()=>({httpUrl:'http://qzone-fixture.invalid'}),log:h.api.log})
+  h.api.core.onebot=onebot
+  const mod=h.modules['qzone-social']=qzoneSocial.setup({...h.api,id:'qzone-social',lib:p=>libs[p],lazy:()=>null,ask:o=>askModel({llm:{
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){yield* await h.stream(opt,[{type:'text-delta',text:'这个纸风车挺好看。'},{type:'finish',reason:{kind:'stop'}}])}
+  }},{...o,model:{provider:'fixture',model:'fixture'}})})
+  assert.equal(h.core.ownsSchedule('qzone-social','interact-tick'),true)
+  clock+=60_000
+  await h.timers.get('统一后台调度')()
+  assert.deepEqual(platform.map(x=>x.action),['comment_qzone','like_qzone','comment_qzone'])
+  const rows=h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  assert.equal(rows.find(x=>x.job==='comment').status,refuse?'not-sent':'sent')
+  assert.equal(rows.find(x=>x.job==='like').status,'sent')
+  assert.equal(rows.find(x=>x.job==='reply').receipt,'102')
+  assert.deepEqual(platform[0].input,{tid:'own-post-1',content:'回复 另一位朋友：这个纸风车挺好看。'})
+  assert.equal(mod.state().count,refuse?1:2)
+  assert.equal(mod.state().reserved,refuse?1:2)
+  assert.equal(h.core.proactiveState().count,0)
+  assert.doesNotMatch(h.core.buildContext({chatId:'private:10003',purpose:'chat',query:'纸风车'}).text,/这个纸风车挺好看/)
+ })
 
  test('installed hub: legacy scheduler uses an isolated one-shot request and preserves native private speech',async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'speakup-candidate-'))

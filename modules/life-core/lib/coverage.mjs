@@ -19,10 +19,10 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  const tz=Intl.DateTimeFormat().resolvedOptions().timeZone
  const scheduleOf=(module,id)=>schedules.find(s=>s.module===module&&s.id===id)
  const used=new Set(),entries=[],conflicts=[]
- function add(id,module,name,{clock,jobs=[],switchOn,window,note,observed=false,requires=()=>true}={}){
+ function add(id,module,name,{clock,jobs=[],platform=false,switchOn,window,note,observed=false,requires=()=>true}={}){
   const timing=clock?scheduleOf(module,clock):null
   if(timing)used.add(module+':'+clock)
-  const loaded=running.has(module),ready=loaded&&jobs.length&&jobs.every(j=>candidateJob(module,j))&&(!clock||timing)&&requires()
+  const loaded=running.has(module),ready=loaded&&(platform||jobs.length&&jobs.every(j=>candidateJob(module,j)))&&(!clock||timing)&&requires()
   const mode=!loaded?'not-loaded':ready?'managed':timing?'clock-only':observed?'observed':'outside'
   entries.push({id,module,label:name,mode,switchState:state(config.enabled===false?false:switchOn),window,note,
    ...(timing&&{checkMinutes:timing.intervalMs/60_000,lastCheckAt:timing.checkedAt||null})})
@@ -41,7 +41,9 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  add('bili.auto','bili','B 站定时浏览与平台互动',{clock:'bili-tick',switchOn:bili?!!(bili.enabled&&(bili.autoBrowse||bili.reply)):undefined,window:sameDayWindow,
   note:'看视频、评论、点赞和分享等结果仍由原模块适配；到期检查不代表写入已纳管。'})
  add('rss.auto','rss-reader','RSS 定时阅读／转发',{clock:'fetch-tick',switchOn:rss.enabled===true,note:rss.carrier==='pool'?'当前设为只进素材池。':'提议后由原入口决定是否转发，仍未使用持久发送候选。'})
- add('qzone-social.auto','qzone-social','空间定时互动',{switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,note:'仍使用本模块的时钟和平台出口。'})
+ const spaceSocial=typeof api.use('qzone-social')?.lifePlatform?.canWrite==='function'
+ add('qzone-social.auto','qzone-social','空间定时互动',{clock:'interact-tick',platform:spaceSocial,switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,
+  note:spaceSocial?'点赞以网关确认为准，评论和回复核对新编号；占用单独的空间互动配额。':'未发现统一空间出口。'})
  add('night.auto','night','长夜如梦／醒后问候',{switchOn:ext.night?.enabled,note:'睡眠、梦和醒后出口由夜间模块管理。'})
  add('impression.auto','impression-card','印象卡片的主动微调',{
   switchOn:ext['impression-card']?.enabled!==false&&ext['impression-card']?.proactiveEnabled===true,note:'仍由印象卡模块检查；与被动查卡分开。'})

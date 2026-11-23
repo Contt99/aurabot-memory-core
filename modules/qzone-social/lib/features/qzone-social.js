@@ -59,8 +59,25 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
   let busy = false
 
   const perform = (action, run) => life ? life.perform(action, run, { sourceScopes: ['private:' + getConfig().ownerQQ] }) : run()
+  const read = async (managed,action,run,args) => {
+    if(managed)return await life.observe(action,run,{...args,selfId:self()})||{value:null,experienceId:null}
+    return {value:await perform(action,run),experienceId:null}
+  }
   const self = () => String(hub.selfId || getConfig().botQQ)
   const owner = () => getConfig().ownerName || '主人'
+  const confirmedToday = s => (s.day === dayKey()?s.count:0)+(life?.platformCount?.(Date.now())||0)
+  const slotsToday = s => (s.day === dayKey()?s.count:0)+(life?.platformSlots?.(Date.now())||0)
+  const issued=new WeakSet()
+  async function submit(spec){
+    issued.add(spec)
+    try{return await life.platform(spec)}finally{issued.delete(spec)}
+  }
+  const lifePlatform={canWrite(spec){
+    const c=getConfig().qzoneSocial
+    const job=spec?.job
+    return issued.has(spec)&&c?.enabled&&slotsToday(load())<Number(c.maxPerDay)&&
+      (job==='reply'?!!c.replyOwn:!!c.commentFriends&&(job!=='like'||!!c.like))
+  }}
 
   async function write(prompt, allowLegacy = false) {
     const snapshot = life?.prepareContext?.({purpose:'public-share',chatId:'',query:'',allowLegacy})
@@ -76,33 +93,34 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
     if (counts) s.count++ // 只有评论算进每天的上限，点赞不算
   }
 
-  async function sendComment(tid, content, targetUin, snapshot) {
+  async function sendComment(tid, content, targetUin, snapshot, managed, refs) {
+    if(managed)return (await submit({...refs,postId:tid,targetUin,text:content,snapshot}))?.ok===true
     const cfg = getConfig()
     if (cfg.dryRun) {
       log.info(`试运行：本来要在空间评论（${targetUin || '自己'} / ${tid}）：${content}`)
       return false
     }
     const result = await perform('comment', () => { life?.checkDraft?.(content, snapshot); const send = () => onebot.call('comment_qzone', { tid, content, ...(targetUin ? { target_uin: Number(targetUin) } : {}) }, { timeoutMs: 30000 }); return life ? life.runContext(snapshot, send) : send() })
-    if (result?.ok === false) { log.warn('空间评论未成功：' + (result.message || '平台拒绝')); return false }
+    if (!result||result.ok===false||result.dryRun||result.simulated||!(result.ok===true||String(result.comment_id??'').trim())) { log.warn('空间评论未确认'); return false }
     log.info(`空间评论（${targetUin || '自己的说说'}）：${content}`)
     return true
   }
 
   /** 回复自己说说下别人的新评论。 */
-  async function replyOwn(s, budget, allowLegacy) {
+  async function replyOwn(s, budget, allowLegacy, managed) {
     let done = 0
-    const list = await perform('own-posts-read', () => onebot.call('get_qzone_msg_list', { num: 5 }, { timeoutMs: 20000 }))
+    const {value:list,experienceId:listId}=await read(managed,'own-posts-read',() => onebot.call('get_qzone_msg_list',{num:5},{timeoutMs:20000}))
     for (const m of list?.msglist || []) {
       if (done >= budget) break
       if (!(m.comment_num > 0) || Date.now() / 1000 - m.time > 3 * 86400) continue
-      const d = await perform('post-read', () => onebot.call('get_qzone_msg_detail', { tid: m.tid, num: 30 }, { timeoutMs: 20000 }))
+      const {value:d,experienceId}=await read(managed,'post-read',() => onebot.call('get_qzone_msg_detail',{tid:m.tid,num:30},{timeoutMs:20000}),{tid:m.tid})
       const handled = new Set(s.replied[m.tid] || [])
       for (const c of d?.comments || []) {
-        if (done >= budget) break
+        if (done >= budget || managed&&slotsToday(s)>=getConfig().qzoneSocial.maxPerDay) break
         const t = pendingInThread(c, self(), handled)
         if (!t.pending.length) continue
         for (const id of t.pending.map((x) => x.id)) handled.add(id) // 这一串新消息只回一次，回不回都不再看
-        for (const x of t.pending) remember(x.name, x.uin, `在你的说说「${String(m.content).slice(0, 30)}」下面说：${String(x.content).slice(0, 200)}`)
+        if(!managed)for (const x of t.pending) remember(x.name, x.uin, `在你的说说「${String(m.content).slice(0, 30)}」下面说：${String(x.content).slice(0, 200)}`)
         const last = t.pending[t.pending.length - 1]
         const name = (u) => (String(u.uin) === self() ? '你' : u.name + (String(u.uin) === String(getConfig().ownerQQ) ? `（你的${owner()}）` : ''))
         const thread = t.thread.map((x) => `${name(x)}：${String(x.content).slice(0, 150)}`).join('\n')
@@ -112,9 +130,10 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
           (others.length ? `这条说说下面大家的评论：\n${others.join('\n')}\n\n` : '') +
           `你要回的是这一串：\n${thread}\n\n${last.name} 刚刚说了新的话，结合说说内容和上面的评论，用你的口气接着回 TA 一句。`, allowLegacy)
         if (!text) continue
-        if (!(await sendComment(m.tid, `回复 ${last.name}：${text}`, undefined, snapshot))) continue
-        memory?.addEvent?.({ text: `在空间回复了${last.name}的评论：${text}`, about: String(last.uin), aboutName: last.name, tags: ['空间'], importance: 0.35 })
-        record(s, { kind: 'reply', who: last.name, post: String(m.content).slice(0, 30), text })
+        if (!(await sendComment(m.tid, `回复 ${last.name}：${text}`, undefined, snapshot,managed,
+          {job:'reply',sourceId:experienceId,detailSourceId:listId,parentId:String(c.comment_id??''),replyId:String(last.comment_id??'')}))) continue
+        if(!managed)memory?.addEvent?.({ text: `在空间回复了${last.name}的评论：${text}`, about: String(last.uin), aboutName: last.name, tags: ['空间'], importance: 0.35 })
+        if(!managed)record(s,{kind:'reply',who:last.name,post:String(m.content).slice(0,30),text})
         done++
       }
       s.replied[m.tid] = [...handled].slice(-200)
@@ -126,45 +145,54 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
   }
 
   /** 逛好友动态：每条说说只判断一次，按概率点赞、评论。 */
-  async function browseFriends(s, budget, allowLegacy) {
+  async function browseFriends(s, budget, allowLegacy, managed) {
     const c = getConfig().qzoneSocial
     let done = 0
-    const res = await perform('feed-read', () => onebot.call('get_qzone_feeds', { count: 15 }, { timeoutMs: 20000 }))
+    const {value:res,experienceId}=await read(managed,'feed-read',() => onebot.call('get_qzone_feeds',{count:15},{timeoutMs:20000}))
     const seen = new Set(s.seen)
     for (const f of pickFeeds(res?.feeds, self())) {
-      if (done >= budget) break
+      if (done >= budget || managed&&slotsToday(s)>=getConfig().qzoneSocial.maxPerDay) break
       if (seen.has(f.key)) continue
       seen.add(f.key)
       const brief = String(f.html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
-      remember(f.nickname, f.uin, '发了说说：' + brief.slice(0, 300))
+      if(!managed)remember(f.nickname, f.uin, '发了说说：' + brief.slice(0, 300))
       const isOwner = String(f.uin) === String(getConfig().ownerQQ)
       const chance = isOwner ? Math.max(c.friendChance, c.ownerChance) : c.friendChance
       if (Math.random() >= chance) continue
       let content = ''
       let images = 0
       let existing = []
+      let detailSourceId
       try {
-        const d = await perform('post-read', () => onebot.call('get_qzone_msg_detail', { tid: f.key, target_uin: Number(f.uin), num: 10 }, { timeoutMs: 20000 }))
+        const {value:d,experienceId:detailId}=await read(managed,'post-read',() => onebot.call('get_qzone_msg_detail',
+          {tid:f.key,target_uin:Number(f.uin),num:10},{timeoutMs:20000}),{tid:f.key,targetUin:String(f.uin)})
         content = String(d?.content || '')
         existing = summarizeComments(d?.comments, { selfId: self(), ownerQQ: getConfig().ownerQQ, ownerName: owner(), max: 8 })
+        detailSourceId=detailId
       } catch (error) {
         content = String(f.html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
       }
       images = (String(f.html || '').match(/<img/g) || []).length
       let liked = false
       if (c.like && !getConfig().dryRun) {
-        try { const result = await perform('like', () => onebot.call('like_qzone', { tid: f.key, target_uin: Number(f.uin), abstime: Number(f.time) || 0 }, { timeoutMs: 20000 })); liked = result?.ok !== false } catch (error) { log.debug('点赞失败：', error.message) }
+        try{
+          if(managed)liked=(await submit({job:'like',postId:f.key,targetUin:String(f.uin),sourceId:experienceId})).ok===true
+          else{const result=await perform('like',async()=>{
+            const response=await onebot.call('like_qzone',{tid:f.key,target_uin:Number(f.uin),abstime:Number(f.time)||0},{timeoutMs:20000})
+            return {ok:response===null||response?.ok===true}
+          });liked=result?.ok===true}
+        }catch(error){log.debug('点赞失败：',error.message)}
       }
       const { text, snapshot } = await write(`你在刷 QQ 空间，看到${isOwner ? `你的${owner()}` : `好友 ${f.nickname}`}发的说说：「${content.slice(0, 300) || '（只有图片）'}」${images ? `（配了图）` : ''}\n` +
         (existing.length ? `下面已经有这些评论：\n${existing.join('\n')}\n\n` : '') +
         `想评论的话，结合说说内容${existing.length ? '和下面大家在聊的（别重复别人说过的话，可以接大家的梗）' : ''}，用你的口气评一句（像朋友之间随手评论那样）。`, allowLegacy)
       if (!text) {
-        if (liked) record(s, { kind: 'like', who: f.nickname, post: content.slice(0, 30), text: '' }, false)
+        if (liked&&!managed) record(s, { kind: 'like', who: f.nickname, post: content.slice(0, 30), text: '' }, false)
         continue
       }
-      if (!(await sendComment(f.key, text, f.uin, snapshot))) continue
-      memory?.addEvent?.({ text: `在空间评论了${isOwner ? owner() : f.nickname}的说说「${content.slice(0, 24)}」：${text}`, about: String(f.uin), aboutName: f.nickname, tags: ['空间'] })
-      record(s, { kind: 'comment', who: f.nickname, post: content.slice(0, 30), text })
+      if (!(await sendComment(f.key,text,f.uin,snapshot,managed,{job:'comment',sourceId:experienceId,detailSourceId}))) continue
+      if(!managed)memory?.addEvent?.({ text: `在空间评论了${isOwner ? owner() : f.nickname}的说说「${content.slice(0, 24)}」：${text}`, about: String(f.uin), aboutName: f.nickname, tags: ['空间'] })
+      if(!managed)record(s,{kind:'comment',who:f.nickname,post:content.slice(0,30),text})
       done++
     }
     s.seen = [...seen].slice(-300)
@@ -177,9 +205,11 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
   }
 
   async function runAttempt({ force = false } = {}) {
-    if (life?.corePresent?.() === false && !force) return {ok:false,message:'life-core 不可用，自动互动已暂停'}
+    if (!force && !life?.platformReady?.()) return {ok:false,message:'统一空间互动接口不可用，自动互动已暂停'}
     const cfg = getConfig()
     const c = cfg.qzoneSocial
+    const managed=!force
+    if(managed&&cfg.dryRun)return {ok:false,status:'dry-run',message:'试运行不会提交空间互动'}
     if (busy) return { ok: false, message: '正在逛空间' }
     if (!force && (!cfg.enabled || !c.enabled)) return { ok: false, message: '没打开' }
     busy = true
@@ -187,10 +217,10 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
     if (s.day !== dayKey()) Object.assign(s, { day: dayKey(), count: 0 })
     s.lastRun = Date.now()
     try {
-      const left = Math.max(0, c.maxPerDay - s.count)
+      const left = Math.max(0, c.maxPerDay - slotsToday(s))
       if (!left) return { ok: true, message: '今天互动够多了', replies: 0, comments: 0 }
-      const replies = c.replyOwn ? await replyOwn(s, Math.min(3, left), force) : 0
-      const comments = c.commentFriends ? await browseFriends(s, Math.min(2, Math.max(0, c.maxPerDay - s.count)), force) : 0
+      const replies = c.replyOwn ? await replyOwn(s, Math.min(3, left), force,managed) : 0
+      const comments = c.commentFriends ? await browseFriends(s, Math.min(2, Math.max(0, c.maxPerDay - slotsToday(s))), force,managed) : 0
       return { ok: true, message: `回了 ${replies} 条评论，评了 ${comments} 条好友说说`, replies, comments }
     } catch (error) {
       log.warn('逛空间出错：', error.message)
@@ -212,7 +242,10 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
     await run()
   }
 
-  return { run, tick, state: () => { const s = load(); return { count: s.day === dayKey() ? s.count : 0, lastRun: s.lastRun, history: s.history.slice(0, 15) } } }
+  return { run, tick,lifePlatform, state: () => {
+    const s=load(),history=[...(life?.platformHistory?.()||[]),...s.history].sort((a,b)=>b.at-a.at)
+    return {count:confirmedToday(s),reserved:slotsToday(s),lastRun:s.lastRun,history:history.slice(0,15)}
+  } }
 }
 
 export function bindApi(api) {
