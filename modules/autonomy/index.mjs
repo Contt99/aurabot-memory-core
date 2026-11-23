@@ -382,7 +382,7 @@ export function parsePersonaMbti(md) {
 export default {
   id: 'autonomy',
   name: '自主生活 · 真实探索与私人日记',
-  version: '0.7.0-life.6',
+  version: '0.7.0-life.7',
   api: 1,
   description: '她自己决定这一刻做什么、下次什么时候醒；间隔按区间随机并受时段活跃度影响。不执行 shell 命令',
   panel: 'panel.js',
@@ -447,8 +447,13 @@ export default {
       }
     };
     api.onDispose(() => { stopped = true; });
+    const withinWakeHours = c => {
+      const hour=new Date().getHours(),from=Number(c.awakeFrom)||0,to=Number(c.awakeTo)||24;
+      return from<=to ? hour>=from&&hour<to : hour>=from||hour<to;
+    };
     const groundedDiary = createPrivateJournal(api, {
       assertActive,
+      allowedWindow:()=>withinWakeHours(cfg()),
       ask: (options) => {
         const { pickReasoningEffort } = api.lib('core/llm.js') || {};
         return ask(api.dsh, { ...options, timeoutMs: Math.max(1, Number(api.settings().askTimeoutSec) || 45) * 1000 }, pickReasoningEffort);
@@ -595,7 +600,7 @@ export default {
     }
 
     /** 把决策变成真实动作 */
-    async function act(d, explorationDeadline, request, context) {
+    async function act(d, explorationDeadline, request, context, wakeKey, manual) {
       if (d.action === 'speak') {
         const target = api.use('speakup');
         const executor = target?.fire;
@@ -606,7 +611,11 @@ export default {
         return { note: r?.message || (ok ? '执行器已确认完成' : '执行器未确认成功，本轮未完成'), extra: { ok, status: r?.status || (ok ? 'ok' : 'unconfirmed') } };
       }
       if (d.action === 'diary') {
-        const r = await groundedDiary.write();
+        const core=api.use('life-core');
+        const r = core?.runDiaryCandidate
+          ? await core.runDiaryCandidate({module:'autonomy',job:'journal',key:wakeKey,target:'server:private-journal',expiresAt:Date.now()+300_000})
+          : manual ? await groundedDiary.write() : {ok:false,status:'unavailable',message:'life-core 私人日记队列未就绪'};
+        if(r.status==='queued')return {note:'私人日记已交给行动核心，尚未保存',extra:{ok:false,status:'queued'}};
         return { note: r.ok && !r.dryRun ? '已保存一篇本地私人日记' : `私人日记未保存：${r.message || r.status}`,
           extra: { ok: r.ok && !r.dryRun, status: r.status, evidenceCount: r.evidenceCount || 0 } };
       }
@@ -702,11 +711,7 @@ export default {
       }
 
       const s = load();
-      const hour = new Date().getHours();
-      const from = Number(c.awakeFrom) || 0;
-      const to = Number(c.awakeTo) || 24;
-      const awake = from <= to ? hour >= from && hour < to : hour >= from || hour < to;
-      if (!awake) {
+      if (!withinWakeHours(c)) {
         s.nextWakeAt = Date.now() + 45 * 60_000;
         save(s);
         return { ok: false, message: '不在活跃时段' };
@@ -766,7 +771,7 @@ export default {
       let result = { note: '', extra: { ok: false } };
       try {
         if (!d.decisionError) context.check(JSON.stringify(d));
-        result = d.decisionError ? { note: d.decisionError, extra: { ok: false, status: 'decision-error' } } : await context.run(() => act(d, explorationDeadline, request, context));
+        result = d.decisionError ? { note: d.decisionError, extra: { ok: false, status: 'decision-error' } } : await context.run(() => act(d, explorationDeadline, request, context,`${s.nextWakeAt}-${s.wakes}`,manual));
       } catch (error) {
         result = { note: `动作失败：${error.message}`, extra: { ok: false } };
       }
@@ -1008,7 +1013,7 @@ export default {
 
     api.route('/state', async () => ({ ok: true, ...snapshot(), capabilities: await (api.use('life-core')?.capabilities?.() || []) }));
     api.route('/grounding', async () => {
-      try { return { ok: true, version: '0.7.0-life.6', ...await groundedDiary.sources() }; }
+      try { return { ok: true, version: '0.7.0-life.7', ...await groundedDiary.sources() }; }
       catch (e) { return { ok: false, message: e.message }; }
     });
     api.route('/diary/preview', async (req) => {
@@ -1035,6 +1040,6 @@ export default {
       return { ok: true };
     });
 
-    return { wake: request => wake(request, true), state: snapshot, activity: () => readLog(200), journal: groundedDiary, requestState:explorationRequest.state,lifeSchedules:()=>[wakeClock] };
+    return { wake: request => wake(request, true), state: snapshot, activity: () => readLog(200), journal: groundedDiary, requestState:explorationRequest.state,lifeSchedules:()=>[wakeClock],lifeJobs:()=>[groundedDiary.job] };
   },
 };

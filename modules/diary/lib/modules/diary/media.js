@@ -121,7 +121,7 @@ export function createDiaryMedia(api, { assets = createDiaryAssets(api.dataDir('
     }
     return {
       text: withCredits(draft.text, images), images: images.map((image) => assets.path(image.id)),
-      media: images, warnings: [...new Set(warnings)], sourceIds: sources.map((s) => s.id), sourceScopes: [...new Set(sources.flatMap((s) => s.sourceScopes || []))], beforeSend: async () => { await canPublish(snapshot, sources); checkContext(withCredits(draft.text, images)) },
+      media: images, warnings: [...new Set(warnings)], sourceIds: sources.map((s) => s.id), sourceScopes: [...new Set(sources.flatMap((s) => s.sourceScopes || []))], sourceRefs:sources, beforeSend: async () => { await canPublish(snapshot, sources); checkContext(withCredits(draft.text, images)) },
     }
   }
   function view(result) {

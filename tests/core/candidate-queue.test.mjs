@@ -31,6 +31,11 @@ test('claimed sends are never replayed after restart, duplicate submit or wrong 
  assert.equal(q.ack(next.id,target,'-42'),true)
  assert.equal(q.get(next.id).status,'sent')
  assert.equal(q.count({module:'tieba-reader',job:'share',target,from:clock}),1)
+ const duplicate=q.submit({...task,key:'different-action'})
+ assert.equal(q.claim(duplicate.id),true)
+ assert.equal(q.sending(duplicate.id),true)
+ assert.equal(q.ack(duplicate.id,target,'-42'),false)
+ assert.equal(q.count({module:'tieba-reader',job:'share',target,from:clock}),1)
 })
 
 test('expiry and forgotten sources terminally revoke a queued candidate',t=>{

@@ -18,7 +18,7 @@ import {  createDiaryArchive  } from './lib/modules/diary/archive.js'
 export default {
   id: 'diary',
   name: '空间日记',
-  version: '1.0.0-life.3',
+  version: '1.0.0-life.4',
   description: '每天最多写一篇 QQ 空间日记；主人私聊里能让她发说说（qq_send_qzone）',
   tab: 'diary',
   files: ['features/qzone.js', 'features/qzone-audience.js', 'features/diary-image.js'],
@@ -47,7 +47,10 @@ export default {
       composeDiary: media.compose,
       // 日记是反思，不回灌为已经发生的事实。
     })
-    api.every(60_000, () => qzone.tick(), '空间日记')
+    const clock={id:'publish-tick',label:'空间日记到期检查',intervalMs:60_000,run:()=>qzone.tick()}
+    api.every(clock.intervalMs, () => {
+      if(!api.use('life-core')?.ownsSchedule?.('diary',clock.id))return clock.run()
+    }, '空间日记（旧核心兼容）')
 
     api.tool(({ chat, level }) => (level === 'full' && chat.kind !== 'system' ? defineTool({
       name: 'qq_send_qzone',
@@ -104,7 +107,7 @@ export default {
       await qzone.remove((await http.body(req)).tid)
       return { ok: true, message: '删掉了' }
     })
-    return qzone
+    return {...qzone,lifeSchedules:()=>[clock]}
   },
 }
 

@@ -5,7 +5,10 @@ export const journalDate = (at = Date.now()) => {
   const d = new Date(at);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 };
-const parse = (s) => JSON.parse(String(s).trim().replace(/^```(?:json)?\s*|\s*```$/gi,''));
+const parse = (s) => {
+  try{return JSON.parse(String(s).trim().replace(/^```(?:json)?\s*|\s*```$/gi,''))}
+  catch{throw Error('模型没有返回格式完整的日记或核验记录')}
+};
 const strings = (a) => Array.isArray(a) && a.length <= 12 && a.every(s => typeof s === 'string' && s.length <= 1000);
 const secret = s => /(?:api.?key|token|cookie|密码|密钥)\s*[:：=]\s*\S+|\b(?:sk|ghp|github_pat)[-_][a-z\d_-]{12,}/i.test(s);
 
@@ -17,7 +20,7 @@ function normalizeDiaryText(value) {
 }
 
 /** Server-local reflections. They are never inserted into universal factual memory. */
-export function createPrivateJournal(api, { ask, assertActive }) {
+export function createPrivateJournal(api, { ask, assertActive, allowedWindow=()=>true }) {
   const file = () => api.dataDir('private-journal.json');
   let busy = false;
   function read() {
@@ -52,7 +55,7 @@ export function createPrivateJournal(api, { ask, assertActive }) {
   api.onDispose(()=>unsubscribe?.());
   bindForget();
   api.on('module/start', id => { if (id === 'life-core') bindForget(); });
-  async function write({ preview = false } = {}) {
+  async function write({ preview = false, commit } = {}) {
     if (busy) return {ok:false,status:'busy',message:'私人日记正在整理中'};
     busy=true;
     try {
@@ -118,16 +121,25 @@ export function createPrivateJournal(api, { ask, assertActive }) {
         sourceScopes:[...new Set(selected.flatMap(s=>s.sourceScopes||[]))],
         sources:selected.map(({id,status,evidenceType,sourceScopes=[]})=>({id,status,evidenceType,sourceScopes})),
         unresolvedQuestions:draft.unresolvedQuestions,notes:draft.notes};
-      if(!preview && !api.config().dryRun) {
+      const saveEntry=()=> {
         const data=read();
+        store({...data,entries:[entry,...data.entries]});
+        return {ok:true,status:'saved',id:entry.id};
+      };
+      if(!preview && !api.config().dryRun) {
         const current = c.assertSourcesCurrent('private',selected);
         if (current?.then) await current;
         assertActive(); checkContext(draft.text,context); checkContext(draft.text,auditContext);
         // The synchronous core guard and atomic local rename have no intervening await.
-        store({...data,entries:[entry,...data.entries]});
+        if(commit)await commit({sources:selected},saveEntry);
+        else saveEntry();
       }
       return {ok:true,status:preview?'preview':api.config().dryRun?'dry-run':'saved',preview,dryRun:!!api.config().dryRun,...entry,evidenceCount:selected.length};
     } catch(e) {return {ok:false,status:'error',message:e.message};} finally {busy=false;}
   }
-  return {write,dates(){bindForget();return [...new Set(read().entries.map(e=>e.date))].sort().reverse()},day(date){bindForget();return read().entries.filter(e=>e.date===date)},sources:async()=>({diarySources:(await core().diarySources('private')).length})};
+  const job={id:'journal',kind:'private-diary',
+    canRun(){try{assertActive();return allowedWindow()}catch{return false}},
+    run:(_row,commit)=>write({commit})
+  };
+  return {write,job,dates(){bindForget();return [...new Set(read().entries.map(e=>e.date))].sort().reverse()},day(date){bindForget();return read().entries.filter(e=>e.date===date)},sources:async()=>({diarySources:(await core().diarySources('private')).length})};
 }

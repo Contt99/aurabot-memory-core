@@ -22,6 +22,9 @@ export function createLifeAdapter(api) {
   return {
     corePresent: () => { const present = Boolean(core()); if (!present) missing(); return present },
     available: () => Boolean(core()?.propose),
+    queueDiary: spec => core()?.queueCandidate?.({module:api.id,...spec}),
+    diaryReceipts: (target,from) => core()?.candidateSentCount?.({module:api.id,job:'publish',target,from})||0,
+    diaryPending: (target,key) => ['sending','unknown'].includes(core()?.candidateStatus?.({module:api.id,job:'publish',target,key})),
     perform(action, run, meta = {}) {
       const c = core()
       if (c?.perform) return c.perform({ module: api.id, action, evidenceType: 'provider', public: false, ...meta }, run)

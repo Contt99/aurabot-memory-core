@@ -8,8 +8,23 @@ const purposeLabel=s=>({chat:'普通聊天',proactive:'主动联系',autonomy:'�
 const typeLabel=s=>({message:'收到的消息',utterance:'说过',action:'行动',observation:'观察',reflection:'反思',task:'任务',commitment:'承诺',fact:'精选事实',profile:'人物关系',media:'图片身份'}[s]||s||'类型未知')
 const capabilityLabel=id=>({web_search:'搜索网页',web_fetch:'读取网页',bili_browse:'逛 B 站',bili_watch:'读取 B 站视频',tieba_search:'搜索贴吧',tieba_browse:'浏览贴吧',tieba_read:'阅读贴吧正文',save_note:'保存笔记'}[id]||id)
 const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子正文','video-metadata':'视频资料','web-body':'网页正文','search-summary':'搜索摘要','confirmed-speech':'已发送原话','qq-ack':'QQ 回执',provider:'模块结果',note:'笔记',tool:'工具结果','tool-result':'工具结果'}[id]||id)
-const candidateLabel=s=>({queued:'等待调度',sending:'等待 QQ 回执',sent:'发送已确认',expired:'已过期',skipped:'主动跳过','not-sent':'未发送'}[s]||statusLabel(s))
-const candidateReason=r=>({'missing-receipt':'没有 QQ 成功回执，不自动重发',restarted:'处理时服务重启，不自动重发','source-or-permission':'来源或发送资格已变化','draft-rejected':'草稿未通过发送检查','draft-failed':'未取得可用草稿','no-interest':'本次没有选择分享',expired:'超过候选有效期',forgotten:'来源已忘记'}[r]||r)
+const candidateTarget=c=>c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
+const candidateName=c=>({space:'空间日记',journal:'私人日记'}[candidateTarget(c)]||
+ (c.module==='tieba-reader'&&c.job==='share'?'贴吧分享':c.module+' / '+c.job))
+const candidateLabel=c=>{
+ const d=candidateTarget(c)
+ if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
+ if(c.status==='sent')return d==='space'?'发布已确认':'发送已确认'
+ if(c.status==='sending')return ({space:'等待说说编号',journal:'保存中',qq:'等待 QQ 回执'})[d]
+ if(c.status==='not-sent')return ({space:'未发布',journal:'未保存',qq:'未发送'})[d]
+ return ({queued:'等待调度',expired:'已过期',skipped:'主动跳过'}[c.status]||statusLabel(c.status))
+}
+const candidateDetail=c=>{
+ const d=candidateTarget(c),r=c.reason
+ if(c.receipt)return ({space:'说说编号 ',journal:'本地记录 ',qq:'QQ 回执 '})[d]+c.receipt
+ if(r==='missing-receipt')return ({space:'没有说说编号，不自动重发',journal:'未确认文件写入，不自动重试',qq:'没有 QQ 成功回执，不自动重发'})[d]
+ return ({restarted:'处理时服务重启，不自动重试','source-or-permission':'来源或执行资格已变化','draft-rejected':'未取得通过检查的正文','draft-failed':'未取得可用草稿','write-failed':'文件未保存','no-interest':'本次没有选择分享',expired:'超过候选有效期',forgotten:'来源已忘记'}[r]||r)
+}
 const box={padding:'clamp(14px, 2.6vw, 24px)',border:'1px solid var(--lc-line)',borderRadius:'12px',background:'var(--lc-surface)',marginBottom:'14px',minWidth:0}
 const flow={display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'center'}
 const prose={whiteSpace:'pre-wrap',overflowWrap:'anywhere'}
@@ -178,11 +193,11 @@ function Panel(){
      paragraph('到期检查不等于工具已执行；实际结果见最近经历。'),
      h('ul',{className:'lc-list'},...state.schedules.map(s=>h('li',{key:s.module+':'+s.id},h('strong',null,s.label),meta(({waiting:'待首次检查',checking:'检查中',checked:'已检查','check-failed':'检查失败'}[s.status]||'状态未知')+(s.checkedAt?' · '+dateLabel(s.checkedAt):'')))))):null,
     paragraph('入口覆盖清单：当前接口未提供，不能据此判断每个后台入口均已接入。'),paragraph('最近写入成功时间：当前接口未提供。')),
-   h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('当前显示经持久队列处理的行动。已排队不等于已发送。'),
+   h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('这里只显示经持久队列处理的行动。看回执可确认实际发布、发送或服务器保存。'),
     resourceMessage(candidateResource,'后台回执'),
     candidates?.length?h('ul',{className:'lc-list'},...candidates.map(c=>h('li',{key:c.id},
-     h('div',{style:flow},h('strong',null,c.module==='tieba-reader'&&c.job==='share'?'贴吧分享':c.module+' / '+c.job),pill(candidateLabel(c.status),c.status==='sent'?'live':undefined)),
-     meta(dateLabel(c.updatedAt)+' · '+(c.receipt?'QQ 回执 '+c.receipt:candidateReason(c.reason)||(c.status==='queued'?'有效至 '+dateLabel(c.expiresAt):''))),
+     h('div',{style:flow},h('strong',null,candidateName(c)),pill(candidateLabel(c),c.status==='sent'||c.status==='saved'&&c.receipt?'live':undefined)),
+     meta([dateLabel(c.updatedAt),candidateDetail(c)||(c.status==='queued'?'有效至 '+dateLabel(c.expiresAt):'')].filter(Boolean).join(' · ')),
      fine('查看行动来源',paragraph('目标：'+c.target),paragraph('候选ID：'+c.id),sourceLine(c.sourceIds,'关联经历'))))):candidates?empty('还没有通过核心排队的后台行动。'):null),
    h('section',{style:box},h('h3',null,'承诺与任务'),paragraph('口头承诺不等于工具已启动；下方按实际持久请求或已确认表达显示状态。'),
     ...tasks.map(t=>h('div',{key:t.id,style:{padding:'12px 0',borderBottom:'1px solid #8884'}},h('strong',null,statusLabel(t.status)),paragraph(t.goal||'未提供任务目标'),t.message?paragraph(t.message):null,paragraph('任务ID：'+t.id+' · '+(t.chatId||'未指定聊天')),paragraph('记于 '+dateLabel(t.at)),t.dueAt?paragraph('计划时间：'+dateLabel(t.dueAt)):null,t.updatedAt?paragraph('更新于 '+dateLabel(t.updatedAt)):null)),

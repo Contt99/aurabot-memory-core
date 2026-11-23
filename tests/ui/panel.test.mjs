@@ -96,3 +96,14 @@ test('health distinguishes native QQ receipts from uncertain sends, and the list
  assert.match(ui.text(),/evidence-id/)
  assert(ui.calls.filter(c=>c.path==='/candidates').every(c=>!c.options?.method))
 })
+
+test('diary receipts identify the destination without showing private writing',async()=>{
+ const ui=mount({'/candidates':{ok:true,items:[
+  {id:'public',module:'diary',job:'publish',target:'qzone:10002',status:'sent',receipt:'space001',updatedAt:at,sourceIds:['vault:1']},
+  {id:'private',module:'autonomy',job:'journal',target:'server:private-journal',status:'saved',receipt:'journal:1',updatedAt:at,sourceIds:['action:2'],text:'私密正文'}
+ ]}})
+ await ui.settle();await ui.click('任务与健康')
+ assert.match(ui.text(),/空间日记.*发布已确认.*说说编号 space001/)
+ assert.match(ui.text(),/私人日记.*已保存到服务器.*本地记录 journal:1/)
+ assert.doesNotMatch(ui.text(),/私密正文|QQ 回执 space001/)
+})

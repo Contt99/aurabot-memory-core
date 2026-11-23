@@ -13,8 +13,9 @@ import {createContinuity} from './lib/continuity.mjs'
 import {registeredTools,declaredArguments} from './lib/capabilities.mjs'
 import {createScheduleDispatcher} from './lib/schedule-dispatch.mjs'
 import {createCandidateQueue,nativeAck} from './lib/candidate-queue.mjs'
+import {createDiaryDispatch,diaryKinds,diaryTarget,isDiaryJob} from './lib/diary-dispatch.mjs'
 
-const VERSION='0.2.0-local.8'
+const VERSION='0.2.0-local.9'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -193,18 +194,31 @@ export default {
    if(!enabled(module))return null
    let jobs
    try{jobs=moduleFor(module)?.lifeJobs?.()}catch{return null}
-   const found=Array.isArray(jobs)?jobs.filter(j=>j?.id===id&&j.kind==='qq'&&typeof j.canRun==='function'&&typeof j.draft==='function'):[]
+   const found=Array.isArray(jobs)?jobs.filter(j=>j?.id===id&&typeof j.canRun==='function'&&
+    (j.kind==='qq'?typeof j.draft==='function':isDiaryJob(module,id,j.kind)&&typeof j.run==='function')):[]
    return found.length===1?found[0]:null
   }
   const candidatePermission=(job,row)=>{try{return job?.canRun(row)}catch{return false}}
   const evidenceCurrent=c=>c.sourceIds.length>0&&experiencesCurrent(c.sourceIds,c.target,'chat')&&c.sourceIds.every(id=>ledger.get(id)?.status==='succeeded')
-  function queueCandidate({module,job,key,target,sourceIds,expiresAt}={}){
-   if(!active()||typeof target!=='string'||!/^private:\d+$/.test(target)||!authorizedChat(cfg(),target)||typeof module!=='string'||!(/^[a-z][a-z0-9-]{1,39}$/.test(module))||
+  function queueCandidate({module,job,key,target,sourceIds=[],expiresAt}={}){
+   if(!active()||typeof target!=='string'||typeof module!=='string'||!(/^[a-z][a-z0-9-]{1,39}$/.test(module))||
      typeof job!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(job)||typeof key!=='string'||!/^[A-Za-z0-9_-]{1,180}$/.test(key)||
-     !Array.isArray(sourceIds)||sourceIds.length>8||sourceIds.some(id=>typeof id!=='string')||!Number.isSafeInteger(expiresAt)||expiresAt<=now()||expiresAt>now()+86400000||
-     !candidateJob(module,job)||!evidenceCurrent({sourceIds,target}))return{ok:false,status:'unavailable',message:'候选任务或证据尚未授权'}
+     !Array.isArray(sourceIds)||sourceIds.length>8||sourceIds.some(id=>typeof id!=='string')||!Number.isSafeInteger(expiresAt)||expiresAt<=now()||expiresAt>now()+86400000)return{ok:false,status:'unavailable',message:'候选任务或证据尚未授权'}
+   const provider=candidateJob(module,job)
+   if(!provider||(provider.kind==='qq'
+     ? !/^private:\d+$/.test(target)||!authorizedChat(cfg(),target)||!evidenceCurrent({sourceIds,target})
+     : target!==diaryTarget(provider.kind,cfg(),api.core.hub)||sourceIds.length))
+    return{ok:false,status:'unavailable',message:'候选任务或证据尚未授权'}
    const row=candidates.submit({module,job,key,target,sourceIds,expiresAt})
    return{ok:true,id:row.id,status:row.status}
+  }
+  async function runDiaryCandidate(spec){
+   const job=candidateJob(spec?.module,spec?.job)
+   if(job?.kind!=='private-diary')return{ok:false,status:'unavailable'}
+   const submission=queueCandidate(spec)
+   if(!submission.ok)return submission
+   if(submission.status!=='queued')return{ok:false,status:submission.status,candidateId:submission.id,message:'该私人日记行动已登记，不重复执行'}
+   return diaryDispatch.run(candidates.get(submission.id),job)
   }
   async function performEvidence(meta,run){
    if(!active()||context.getStore())return{value:await run(),experienceId:null}
@@ -218,9 +232,15 @@ export default {
    queueBusy=true
    try{
     const ready=candidates.ready()
-    if(!continuity.contextManaged('proactive'))return
+    let qqDeferred=false
     for(const row of ready){
      const job=candidateJob(row.module,row.job)
+     if(diaryKinds.has(job?.kind)){
+      const result=await diaryDispatch.run(row,job)
+      if(result.status==='queued')continue
+      return result
+     }
+     if(qqDeferred||!continuity.contextManaged('proactive'))continue
      const permission=evidenceCurrent(row)&&candidatePermission(job,row)
      if(permission==='defer')continue
      if(permission!==true){candidates.cancel(row.id,'source-or-permission');continue}
@@ -252,8 +272,8 @@ export default {
       try{if(evidenceCurrent(row))await candidateJob(row.module,row.job)?.confirmed?.(row,draft,String(ack.message_id))}catch{log.warn?.('候选回执已记账；原模块面板摘要未更新')}
       return{ok:true,status:'sent',messageId:String(ack.message_id),candidateId:row.id}
      }},row)
-     // One actual model/send attempt per dispatch. A shared gate deferral doesn't
-     // discard the candidate or run a second module to evade the same gate.
+     if(result?.status==='deferred'){qqDeferred=true;continue}
+     // At most one attempt. Diary work does not use or bypass QQ touch quotas.
      return result
     }
    }finally{queueBusy=false}
@@ -304,6 +324,8 @@ export default {
   const {recall,experienceDetail,experiencesCurrent}=createRecall({api,ledger,cfg,active,telemetry,current:actionCurrent,inject:false})
   const continuity=createContinuity({api,ledger,cfg,active,recall,experiencesCurrent,diarySources,assertSourcesCurrent,telemetry,now,
    candidateSources: chatId=>{const m=context.getStore();return m?.candidateId&&m.chatId===chatId?m.sourceIds||[]:[]}})
+  const diaryDispatch=createDiaryDispatch({candidates,now,active,disposed:()=>disposed,sleeping,cfg,hub:()=>api.core.hub,continuity,assertSourcesCurrent,
+   jobFor:candidateJob,permission:candidatePermission,record:recordOutcome})
   const managementGuard=req=>{
    try {
     const host=String(req?.headers?.host||''),hostname=new URL('http://'+host).hostname
@@ -328,6 +350,7 @@ export default {
   api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),schedules:dispatcher.inventory(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
-  return {version:VERSION,capabilities,execute,perform,performEvidence,propose:request=>propose(request),queueCandidate,candidateSentCount:candidates.count,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
+  return {version:VERSION,capabilities,execute,perform,performEvidence,propose:request=>propose(request),queueCandidate,runDiaryCandidate,candidateSentCount:candidates.count,
+   candidateStatus:spec=>!disposed?candidates.byKey(spec)?.status:undefined,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }
 }

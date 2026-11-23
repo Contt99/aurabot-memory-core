@@ -15,6 +15,9 @@ import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
 import {createLifeAdapter as purposeAdapter} from '../../modules/purpose/life.mjs'
 import lifeDefinition from '../../modules/life-core/index.mjs'
 import tiebaDefinition from '../../modules/tieba-reader/index.mjs'
+import {bindApi as bindQzone,createQzone} from '../../modules/diary/lib/features/qzone.js'
+import {createLifeAdapter as diaryAdapter} from '../../modules/diary/life.mjs'
+import {createPrivateJournal,journalDate} from '../../modules/autonomy/lib/private-journal.mjs'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -26,6 +29,52 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ test('installed one-shot model and durable diary queue keep Qzone and the server-local journal separate',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'diary-candidates-'))
+  const clock=new Date().setHours(14,0,0,0)
+  const {h}=makeHost(t,{sdk,now:()=>clock})
+  h.modules['life-core']=h.core
+  h.cfg.diary={enabled:true,timesPerDay:1,windowStart:'09:00',windowEnd:'23:00',minGapMinutes:60,minChars:1,maxChars:120,
+   sourceGroups:[],attachImage:false,rich:{enabled:false},visibility:'friends'}
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const loaded=await Promise.all(['core/store.js','core/net.js','chat/reply.js'].map(async p=>[p,await import(pathToFileURL(path.join(source,p)))]))
+  const library=Object.fromEntries(loaded),requests=[],writes=[]
+  const read=await h.core.performEvidence({module:'fixture',action:'read',public:true,evidenceType:'web-body'},async()=>({ok:true,text:'PUBLIC_PAPER_WINDMILL'}))
+  const priv=await h.core.performEvidence({module:'fixture',action:'read',chatId:chat.chatId,evidenceType:'web-body'},async()=>({ok:true,text:'OWNER_PRIVATE_PAPER_WINDMILL'}))
+  const ask=opts=>askModel({llm:{
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){
+    requests.push(opt)
+    const response=opts.system==='fixture:public'?{text:'今天读了一篇纸风车的资料。',imageIds:[]}:
+     opts.system.includes('独立核验员')?{approved:true,sourceIds:[priv.experienceId],issues:[]}:
+     {text:'读了纸风车资料，先记在私人日记里。',sourceIds:[priv.experienceId],unresolvedQuestions:[],notes:[]}
+    yield* await h.stream(Object.freeze(opt),[{type:'text-delta',text:JSON.stringify(response)},{type:'finish',reason:{kind:'stop'}}])
+   }
+  }},{...opts,model:{provider:'fixture',model:'fixture'}})
+  const publicApi={...h.api,id:'diary',lib:p=>library[p],ask:o=>ask({...o,system:'fixture:public'})}
+  bindQzone(publicApi)
+  const qzone=h.modules.diary=createQzone({getConfig:publicApi.config,life:diaryAdapter(publicApi),hub:h.api.core.hub,log:h.api.log,
+   onebot:{call:async(action,params,options)=>{writes.push({action,params,options});return{tid:'space-host-01',time:Math.floor(clock/1000)}}},now:()=>clock,rand:()=>0,composeDiary:createDiaryMedia(publicApi).compose})
+  await qzone.tick();await h.timers.get('统一后台调度')()
+  assert.equal(writes.length,1)
+  assert.equal(writes[0].action,'send_qzone_msg')
+  assert.equal(writes[0].params.ugc_right,4)
+  assert.equal(writes[0].options.retries,0)
+  assert.match(JSON.stringify(requests[0].messages),/PUBLIC_PAPER_WINDMILL/)
+  assert.doesNotMatch(JSON.stringify(requests[0].messages),/OWNER_PRIVATE_PAPER_WINDMILL/)
+  const journal=createPrivateJournal({...h.api,id:'autonomy'}, {ask,assertActive(){}})
+  h.modules.autonomy={lifeJobs:()=>[journal.job]}
+  const result=await h.core.runDiaryCandidate({module:'autonomy',job:'journal',key:'wake-host-01',target:'server:private-journal',expiresAt:clock+60000})
+  assert.equal(result.status,'saved',result.message)
+  const [entry]=journal.day(journalDate())
+  assert.deepEqual(entry.sourceIds,[priv.experienceId])
+  assert.match(JSON.stringify(requests[1].messages),/OWNER_PRIVATE_PAPER_WINDMILL/)
+  assert.equal(writes.length,1)
+  const receipts=h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  assert.deepEqual(receipts.map(r=>r.receipt),[entry.id,'space-host-01'])
+  assert.ok(receipts.find(r=>r.job==='publish').sourceIds.includes(read.experienceId))
+ })
 
  test('installed hub: a scheduled Tieba candidate receives one QQ ACK and the next model request sees the exact share',async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'tieba-candidate-'))

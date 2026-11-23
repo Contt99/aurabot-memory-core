@@ -8,6 +8,7 @@ export function createCandidateQueue(db,now){
   sourceIds TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,updatedAt INTEGER NOT NULL,
   status TEXT NOT NULL,receipt TEXT,reason TEXT,UNIQUE(module,job,jobKey,target));
   CREATE INDEX IF NOT EXISTS life_candidates_status ON life_candidates(status,createdAt);
+  CREATE INDEX IF NOT EXISTS life_candidates_receipt ON life_candidates(target,receipt) WHERE receipt IS NOT NULL;
   CREATE INDEX IF NOT EXISTS life_candidates_ack ON life_candidates(module,job,target,status,updatedAt);`)
  db.prepare("UPDATE life_candidates SET status=CASE WHEN status='sending' THEN 'unknown' ELSE 'interrupted' END,updatedAt=?,reason='restarted' WHERE status IN ('running','sending')").run(now())
  const parse=r=>r?{...r,sourceIds:JSON.parse(r.sourceIds)}:null
@@ -36,18 +37,23 @@ export function createCandidateQueue(db,now){
   return db.prepare("UPDATE life_candidates SET status='sending',updatedAt=? WHERE id=? AND status='running' AND expiresAt>?").run(at,id,at).changes===1
  }
  function ack(id,target,receipt){
-  return nativeAck(receipt)&&db.prepare("UPDATE life_candidates SET status='sent',receipt=?,updatedAt=?,reason=NULL WHERE id=? AND target=? AND status='sending'")
-   .run(String(receipt),now(),id,target).changes===1
+  return nativeAck(receipt)&&confirm(id,target,'sent',receipt)
+ }
+ function confirm(id,target,status,receipt){
+  return db.prepare(`UPDATE life_candidates SET status=?,receipt=?,updatedAt=?,reason=NULL
+   WHERE id=? AND target=? AND status='sending' AND NOT EXISTS(SELECT 1 FROM life_candidates WHERE target=? AND receipt=?)`)
+   .run(status,String(receipt),now(),id,target,target,String(receipt)).changes===1
  }
  function forget(ids){
   if(!ids.size)return
   const candidates=db.prepare('SELECT id,status,sourceIds FROM life_candidates WHERE sourceIds<>\'[]\'').iterate()
   const touched=[]
   for(const c of candidates)if(JSON.parse(c.sourceIds).some(id=>ids.has(id)))touched.push(c.id)
-  const clear=db.prepare("UPDATE life_candidates SET sourceIds='[]',status=CASE WHEN status IN ('queued','running') THEN 'cancelled' ELSE status END,reason=CASE WHEN status IN ('queued','running') THEN 'forgotten' ELSE reason END,updatedAt=CASE WHEN status IN ('queued','running') THEN ? ELSE updatedAt END WHERE id=?")
+  const clear=db.prepare("UPDATE life_candidates SET sourceIds='[]',receipt=CASE WHEN status='saved' THEN NULL ELSE receipt END,status=CASE WHEN status IN ('queued','running') THEN 'cancelled' ELSE status END,reason=CASE WHEN status IN ('queued','running','saved') THEN 'forgotten' ELSE reason END,updatedAt=CASE WHEN status IN ('queued','running') THEN ? ELSE updatedAt END WHERE id=?")
   for(const id of touched)clear.run(now(),id)
  }
- return {get,submit,ready,claim,sending,ack,forget,
+ return {get,byKey,submit,ready,claim,sending,ack,confirm,forget,
+  bindSources:(id,sourceIds)=>db.prepare("UPDATE life_candidates SET sourceIds=? WHERE id=? AND status='running'").run(JSON.stringify([...new Set(sourceIds)]),id).changes===1,
   cancel:(id,reason)=>update(id,'queued','cancelled',reason)||update(id,'running','cancelled',reason),
   finish:(id,status,reason)=>status==='unknown'?update(id,'sending',status,reason):update(id,'running',status,reason)||(status==='not-sent'&&update(id,'sending',status,reason)),
   count:({module,job,target,from})=>db.prepare("SELECT COUNT(*) n FROM life_candidates WHERE module=? AND job=? AND target=? AND status='sent' AND updatedAt>=?")

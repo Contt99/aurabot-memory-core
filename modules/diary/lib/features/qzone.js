@@ -36,13 +36,18 @@ export function planDiaryTimes({ timesPerDay, windowStart, windowEnd, minGapMinu
   return Array.from({ length: n }, (_, i) => a + Math.floor((span / n) * (i + 0.5)))
 }
 
-export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, composeDiary, life }) {
+export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, composeDiary, life, now = Date.now, rand = Math.random }) {
   const file = () => dataDir('diary.json')
   const state = () => readJson(file(), () => ({ plan: { day: '', times: [], done: [] }, history: [] }))
   const save = (s) => writeJson(file(), s)
   let busy = false
+  const minuteOf = at => new Date(at).getHours()*60+new Date(at).getMinutes()
+  const todayOf = at => dayKey(new Date(at))
+  const target = () => 'qzone:'+String(hub?.selfId||getConfig().botQQ||'current')
+  const todayPublished = (history,at=now()) => history.some(r=>r.ok&&!r.dryRun&&todayOf(r.at)===todayOf(at))||
+    Boolean(life?.diaryReceipts?.(target(),new Date(at).setHours(0,0,0,0)))
 
-  async function post(content, { images = [], visibility, beforeSend, sourceScopes = ['private:' + getConfig().ownerQQ] } = {}) {
+  async function post(content, { images = [], visibility, beforeSend, sourceScopes = ['private:' + getConfig().ownerQQ], sourceRefs=[], commit } = {}) {
     const cfg = getConfig()
     const text = cleanOutboundText(normalizeQzoneText(content), { warn: (message) => log.warn(`空间：${message}`) }).trim()
     if (!text) return { ok: false, message: '说说是空的' }
@@ -51,6 +56,7 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
     try { audience = resolveAudience(cfg, visibility) } catch (error) { return { ok: false, message: error.message } }
     if (!cfg.enabled) return { ok: false, message: '总开关关着' }
     if (cfg.dryRun) {
+      if(commit)return {ok:false,message:'已切换到试运行，空间候选未发布'}
       log.info(`试运行：本来要发说说（${audience.label}）：${text.slice(0, 60)}`)
       return { ok: true, tid: '', dryRun: true, visibility: audience.visibility, label: audience.label, target_uins: audience.target_uins || [] }
     }
@@ -66,24 +72,31 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
     }
     try {
       // 下载图片可能花几秒，发布前用最新配置再算一次，免得中途改了范围还按旧的发出去。
-      const latest = getConfig()
-      audience = resolveAudience(latest, visibility)
-      if (!latest.enabled || latest.dryRun) return { ok: false, message: '发布前开关已变化，本次未发布。' }
       await beforeSend?.()
       const send = async () => {
-        await beforeSend?.()
-        const response = await onebot.call('send_qzone_msg', { content: text, ugc_right: audience.ugc_right, ...(audience.target_uins ? { target_uins: audience.target_uins } : {}), ...(imgs.length ? { images: imgs } : {}) }, { timeoutMs: 60000 })
-        const tid = String(response?.tid ?? response?.id ?? (typeof response === 'string' || typeof response === 'number' ? response : ''))
-        return response?.ok === false || !tid ? { ok: false, message: response?.message || '平台未返回说说编号，结果待确认，不自动重发' } : { ...response, ok: true, tid }
+        if(!commit)await beforeSend?.()
+        const latest=getConfig()
+        audience=resolveAudience(latest,visibility)
+        if(!latest.enabled||latest.dryRun)return {ok:false,message:'发布前开关已变化，本次未发布。'}
+        const response = await onebot.call('send_qzone_msg', { content: text, ugc_right: audience.ugc_right, ...(audience.target_uins ? { target_uins: audience.target_uins } : {}), ...(imgs.length ? { images: imgs } : {}) }, { timeoutMs: 60000, ...(commit&&{retries:0}) })
+        // SnowLuma 2.4.2 returns data {tid: string, time: integer}. Keep
+        // older bridge compatibility for explicit/manual posts only.
+        const nativeReceipt=typeof response?.tid==='string'&&Number.isInteger(response.time)&&response.time>0
+        const raw = commit ? (nativeReceipt?response.tid:'') : response?.tid ?? response?.id ?? response
+        const tid = typeof raw==='string'||typeof raw==='number'?String(raw):''
+        return response?.ok===false||response?.dryRun||response?.simulated||!/^[A-Za-z0-9_-]{1,128}$/.test(tid)||/^sim-/i.test(tid)
+          ?{ok:false,message:!commit&&response?.message||'平台未返回说说编号，结果待确认，不自动重发'}
+          :{ok:true,tid}
       }
-      const r = life ? await life.perform('publish', send, { evidenceType: 'ack', sourceScopes, kind: 'reflection' }) : await send()
+      const r = commit ? await commit({sources:sourceRefs},send) : life ? await life.perform('publish', send, { evidenceType: 'ack', sourceScopes, kind: 'reflection' }) : await send()
       if (!r?.ok) return r
       const tid = r.tid
       log.info(`发了一条说说（${audience.label}，tid ${tid || '?'}）`)
       return { ok: true, tid, visibility: audience.visibility, label: audience.label, target_uins: audience.target_uins || [], imageCount: imgs.length, imageIndexes }
     } catch (error) {
-      log.warn('发说说失败：', error.message)
-      return { ok: false, message: error.message }
+      const message=commit?'空间候选发布未确认':error.message
+      log.warn('发说说失败：', message)
+      return { ok: false, message }
     }
   }
 
@@ -153,14 +166,17 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
   }
 
   /** 写一篇并发出去。 */
-  async function writeDiary({ visibility, preview = false, manual = true } = {}) {
+  async function writeDiary({ visibility, preview = false, manual = true, commit } = {}) {
     if (busy) return { ok: false, message: '上一篇还在写' }
     busy = true
     try {
       const cfg = getConfig().diary
       // 名单/范围不合法就别让模型白写一篇再失败
       try { resolveAudience(getConfig(), visibility) } catch (error) { return { ok: false, message: error.message } }
-      if (!preview && state().history.some((row) => row.ok && !row.dryRun && dayKey(new Date(row.at)) === dayKey())) return { ok: false, message: '今天已经写过一篇空间日记了' }
+      if (!preview && todayPublished(state().history)) return { ok: false, message: '今天已经写过一篇空间日记了' }
+      if (!preview && manual && life?.diaryPending?.(target(),todayOf(now()))) {
+        return {ok:false,status:'unknown',message:'今天的空间日记发布结果待核实。请先打开 QQ 空间查看；不会再生成一篇，以免重复。'}
+      }
       if (composeDiary) {
         const composed = await composeDiary({ history: state().history, allowLegacy: manual || preview })
         const draft = { ...composed, images: [...(composed.images || [])], text: normalizeQzoneText(composed.text) }
@@ -172,13 +188,14 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
         const details = { text: draft.text, media: draft.media, warnings: draft.warnings, visibility: audience.visibility, label: audience.label }
         if (preview) return { ok: true, preview: true, ...details }
         await draft.beforeSend?.()
-        const r = await post(draft.text, { images: draft.images, visibility, beforeSend: draft.beforeSend, sourceScopes: draft.sourceScopes })
+        const r = await post(draft.text, { images: draft.images, visibility, beforeSend: draft.beforeSend, sourceScopes: draft.sourceScopes, sourceRefs:draft.sourceRefs,commit })
+        const retainDraft=r.ok&&(!commit||!r.dryRun)
         const s = state()
         s.history.unshift({
-          at: Date.now(), text: draft.text, ok: r.ok, tid: r.tid || '', dryRun: Boolean(r.dryRun),
+          at: now(), text: retainDraft?draft.text:'', ok: r.ok, tid: r.tid || '', dryRun: Boolean(r.dryRun),
           visibility: r.visibility || audience.visibility, target_uins: r.target_uins || [],
           error: r.ok ? '' : r.message, media: (r.imageIndexes || []).map((index) => draft.media[index]),
-          imageCount: r.imageCount || 0, warnings: draft.warnings, sourceIds: draft.sourceIds || [], sourceScopes: draft.sourceScopes || [],
+          imageCount: r.imageCount || 0, warnings: draft.warnings, sourceIds: retainDraft?draft.sourceIds||[]:[], sourceScopes: retainDraft?draft.sourceScopes||[]:[],
         })
         s.history = s.history.slice(0, 100)
         save(s)
@@ -189,29 +206,49 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
       }
       return { ok: false, message: '公开日记来源服务不可用，本次未发布' }
     } catch (error) {
-      log.warn('写日记失败：', error.message)
-      return { ok: false, message: error.message }
+      const message=commit?'空间日记正文未通过准备或权限检查':error.message
+      log.warn('写日记失败：', message)
+      return { ok: false, message }
     } finally {
       busy = false
     }
   }
 
   /** 每分钟调一次。 */
+  const job = {
+    id:'publish',kind:'public-diary',
+    canRun(row){
+      const cfg=getConfig(),at=now(),minute=minuteOf(at)
+      return cfg.enabled&&cfg.diary.enabled&&cfg.diary.timesPerDay>0&&row.target===target()&&todayOf(row.createdAt)===todayOf(at)&&
+        minute>=toMin(cfg.diary.windowStart)&&minute<toMin(cfg.diary.windowEnd)&&!todayPublished(state().history,at)
+    },
+    run:(_row,commit)=>writeDiary({manual:false,commit})
+  }
   async function tick() {
     if (life?.corePresent?.() === false) return
     const cfg = getConfig()
     if (!cfg.enabled || !cfg.diary.enabled) return
     const s = state()
-    const today = dayKey()
+    const at=now(),today=todayOf(at)
     if (s.plan.day !== today) {
-      s.plan = { day: today, times: planDiaryTimes({ ...cfg.diary, timesPerDay: Math.min(1, cfg.diary.timesPerDay) }), done: [] }
+      s.plan = { day: today, times: planDiaryTimes({ ...cfg.diary, timesPerDay: Math.min(1, cfg.diary.timesPerDay) },rand), done: [] }
       save(s)
       log.info(`今天的日记时间：${s.plan.times.map((m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`).join('、') || '（不写）'}`)
     }
-    const now = new Date()
-    const nowMin = now.getHours() * 60 + now.getMinutes()
+    const nowMin=minuteOf(at)
     const due = s.plan.times.find((m) => m <= nowMin && !s.plan.done.includes(m))
     if (due === undefined) return
+    const end=toMin(cfg.diary.windowEnd),start=toMin(cfg.diary.windowStart)
+    if(!(end>start)||nowMin<start||nowMin>=end)return
+    const stopAt=new Date(at)
+    stopAt.setHours(Math.floor(end/60),end%60,0,0)
+    const queued=life?.queueDiary?.({job:job.id,key:today,target:target(),expiresAt:stopAt.getTime()})
+    if(queued){
+      if(queued.ok){s.plan.done.push(due);save(s)}
+      return queued
+    }
+    // Old injected/core contracts retain the previous entry point; the module
+    // host's updated adapter never falls through when the registry is present.
     const run = async () => {
       s.plan.done.push(due)
       save(s)
@@ -223,12 +260,12 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary, pickImage, c
 
   function nextTime() {
     const s = state()
-    const nowMin = new Date().getHours() * 60 + new Date().getMinutes()
-    const m = s.plan.day === dayKey() ? s.plan.times.find((x) => !s.plan.done.includes(x) && x >= nowMin) : undefined
+    const at=now(),nowMin=minuteOf(at)
+    const m = s.plan.day === todayOf(at) ? s.plan.times.find((x) => !s.plan.done.includes(x) && x >= nowMin) : undefined
     return m === undefined ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
   }
 
-  return { post, remove, writeDiary, tick, syncHistory, history: () => state().history, nextTime }
+  return { post, remove, writeDiary, tick, syncHistory, history: () => state().history, nextTime, lifeJobs:()=>[job] }
 }
 
 export function bindApi(api) {
