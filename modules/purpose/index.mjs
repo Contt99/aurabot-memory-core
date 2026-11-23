@@ -15,7 +15,7 @@ import {  createPurpose  } from './lib/purpose/module.js'
 export default {
   id: 'purpose',
   name: '目的引擎（实验）',
-  version: '1.0.0-life.5',
+  version: '1.0.0-life.6',
   description: '像人一样主动找主人搭话：攒素材 → 记观察 → 立目标假设 → 挑一个候选，到点了才来找你。默认关闭；与旧主动搭话共用共享门禁，不重复消耗额度。',
   tab: 'speakup',
   files: ['purpose/engine.js', 'purpose/module.js'],
@@ -47,7 +47,10 @@ export default {
       pet: () => api.use('pet'),
       personaText: () => { try { return api.core.personas?.current?.() || '' } catch { return '' } },
     })
-    api.every(60_000, () => purpose.tick(), '目的引擎')
+    const clock={id:'contact-tick',label:'目的引擎到期检查',intervalMs:60_000,run:()=>purpose.tick()}
+    api.every(clock.intervalMs, () => {
+      if(!api.use('life-core')?.ownsSchedule?.('purpose',clock.id))return clock.run()
+    }, '目的引擎（旧核心兼容）')
     api.route('/purpose/fire', async () => {
       if (!api.settings().enabled) return { ok: false, message: '目的引擎没开（主动搭话页可以打开）' }
       const r = await purpose.fire('手动')
@@ -63,6 +66,6 @@ export default {
     api.route('/purpose/preview', async () => ({ ok: true, preview: purpose.preview() }))
     // 驱动向量 → 提示层：把「最近比较想要什么」轻描淡写地写进每一轮的上下文（引擎关着时返回空）
     api.rule(() => purpose.drivesRule())
-    return purpose
+    return {...purpose,lifeSchedules:()=>[clock]}
   },
 }

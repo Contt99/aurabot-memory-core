@@ -18,7 +18,8 @@ export function createLifeAdapter(api) {
   const delivery = new AsyncLocalStorage()
   api.on('sent', (_message, info) => {
     const active = delivery.getStore()
-    if (active && info?.chatId === active.chatId && info.messageId !== undefined && !String(info.messageId).startsWith('sim-')) active.receipts.push(String(info.messageId))
+    const id=String(info?.messageId??'')
+    if(active&&info?.chatId===active.chatId&&/^-?[1-9]\d{0,19}$/.test(id)&&!active.receipts.includes(id))active.receipts.push(id)
   })
   const askOnce = createSingleFlightAsk(api)
   let warned = false
@@ -66,6 +67,15 @@ export function createLifeAdapter(api) {
       if (!result?.ok) throw Error(result?.message || '统一记忆草稿校验未通过，本轮不发送')
     },
     available: () => Boolean(core()?.propose),
+    queueContact: spec=>core()?.queueCandidate?.({module:api.id,...spec}),
+    contactReady: ()=>typeof core()?.latestConfirmedSpeech==='function',
+    latestConfirmedSpeech: chatId=>core()?.latestConfirmedSpeech?.(chatId),
+    lastContactAckAt: chatId=>core()?.lastContactAckAt?.(chatId)||0,
+    recordNativeSpeech(chatId,text,userText){
+      if(!text)return
+      try{api.core.hub.logChat?.(chatId,'bot',text);api.emit?.('activity',{kind:'out',chatId,reply:text,userText})}
+      catch{api.log.warn?.('目的：QQ 已确认送达，旧流水或心情活动未补写')}
+    },
     proactiveState: () => core()?.proactiveState?.(),
     recall: options => core()?.recall?.(options) || {items:[],text:''},
     sourcesCurrent: (ids,chatId) => Boolean(core()?.experiencesCurrent?.(ids,chatId)),

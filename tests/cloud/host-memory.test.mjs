@@ -18,6 +18,8 @@ import tiebaDefinition from '../../modules/tieba-reader/index.mjs'
 import {bindApi as bindQzone,createQzone} from '../../modules/diary/lib/features/qzone.js'
 import {createLifeAdapter as diaryAdapter} from '../../modules/diary/life.mjs'
 import {createPrivateJournal,journalDate} from '../../modules/autonomy/lib/private-journal.mjs'
+import purposeDefinition from '../../modules/purpose/index.mjs'
+import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -29,6 +31,35 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ for(const withdraw of [false,true])test('installed hub: purpose candidate '+(withdraw?'honors a forget after an async outbound filter':'persists a native QQ receipt'),async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'purpose-candidate-'))
+  const {h,dispatched}=makeHost(t,{sdk,rows:[message(1,'今天好想一起看看流星雨？')],
+   afterSendFilter:withdraw?async instance=>{
+    await new Promise(r=>setImmediate(r))
+    instance.core.forgetPerson('10001','',{exactSources:true,sourceIds:['vault:1'],chatId:chat.chatId})
+   }:undefined})
+  Object.assign(h.cfg,{speakUp:{awakeFrom:0,awakeTo:24,idleMinutes:0,minIntervalMinutes:1},ext:{purpose:{enabled:true,minMaterials:0}}})
+  h.api.core.mutes={muted:()=>false}
+  h.modules['life-core']=h.core
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const loaded=await Promise.all(['core/store.js','chat/reply.js'].map(async p=>[p,await import(pathToFileURL(path.join(source,p)))]))
+  const library=Object.fromEntries(loaded),store=library['core/store.js']
+  store.writeJson(store.dataDir('purpose','purpose-state.json'),{day:localDateKey(),lastRunAt:Date.now()-60_000})
+  const purpose=h.modules.purpose=purposeDefinition.setup({...h.api,id:'purpose',settings:()=>h.cfg.ext.purpose,lib:p=>library[p],ask:o=>askModel({llm:{
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){
+    yield* await h.stream(Object.freeze(opt),[{type:'text-delta',text:'要一起看流星雨吗？'},{type:'finish',reason:{kind:'stop'}}])
+   }
+  }},{...o,model:{provider:'fixture',model:'fixture'}})})
+  await purpose.tick();await h.timers.get('统一后台调度')()
+  const [candidate]=h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  assert.equal(dispatched.length,withdraw?0:1,JSON.stringify({candidate,warnings:h.warnings}))
+  assert.equal(candidate.status,withdraw?'not-sent':'sent')
+  assert.equal(candidate.receipt,withdraw?null:'1')
+  assert.equal(h.core.proactiveState().count,1)
+  if(!withdraw)assert.match(h.core.buildContext({chatId:chat.chatId,purpose:'chat',query:'你刚才说的'}).text,/要一起看流星雨吗/)
+ })
 
  test('installed one-shot model and durable diary queue keep Qzone and the server-local journal separate',async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'diary-candidates-'))

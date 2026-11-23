@@ -88,6 +88,16 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
    correctionSources:correction?.data.sourceIds||[],text:correction?'已纠正：'+correction.data.text+'（旧说法不作为当前事实）':String(safeValue(r?.text??e.data.text??'')),messageId:e.data.messageId||'',evidenceType:e.type==='utterance'?'confirmed-speech':'chat-message'}
  }
  function buildContext(options={}) {return build(options)}
+ function latestConfirmedSpeech(chatId){
+  if(!managed('proactive')||!authorizedChat(cfg(),chatId))return null
+  const recent=vault()?.timelineRecent?.({chatId,limit:12})||[]
+  for(const row of recent)if(row.dir==='out')project(row)
+  const e=store.latestEvent(chatId,'utterance')
+  if(e?.status!=='confirmed'||!nativeAck(e.data.messageId)||!(e.occurredAt>0))return null
+  const item=chatItem(e)
+  const lastIncomingAt=Math.max(0,...recent.filter(r=>r.dir==='in').map(r=>Math.max(Number(r.observedAt)||0,Number(r.t)||0)))
+  return item?{id:item.id,eventId:e.id,messageId:item.messageId,at:item.occurredAt,text:item.text,lastIncomingAt}:null
+ }
  function build(options,hydration,media) {
   try{return compile(options,hydration,media)}catch(e){if(e.code?.startsWith('ERR_SQLITE')||/disk (?:is )?full/i.test(e.message))warn(e);throw e}
  }
@@ -426,5 +436,5 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
   const request=api.use('autonomy')?.requestState?.();if(request)tasks.unshift(safeValue(request))
   return{...store.status(),managed:managed(),streamReady,preStepReady,lastError,budget:6000,tasks,storage,providers:{vault:typeof vault()?.timelineRecent==='function',memory:typeof api.use('memory')?.contextForCore==='function',impression:typeof api.use('impression-card')?.contextForCore==='function',image:typeof api.use('image-familiar')?.contextCurrent==='function'}}
  }
- return{sourceCurrent:id=>!store.reason(id),contextManaged:managed,mediaTimelineManaged,buildContext,assertContextCurrent,validateDraft,recordObservation,prepareObservation,runWithContext:(s,run)=>{assertContextCurrent(s);return bound.run(load(s),run)},correctEvent,timeline,memoryStatus,eventDetail,contextDetail:id=>store.snapshot(id),invalidate,sync}
+ return{sourceCurrent:id=>!store.reason(id),contextManaged:managed,mediaTimelineManaged,buildContext,latestConfirmedSpeech,assertContextCurrent,validateDraft,recordObservation,prepareObservation,runWithContext:(s,run)=>{assertContextCurrent(s);return bound.run(load(s),run)},correctEvent,timeline,memoryStatus,eventDetail,contextDetail:id=>store.snapshot(id),invalidate,sync}
 }

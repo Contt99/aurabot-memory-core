@@ -86,7 +86,9 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
   const memoryOf = () => { try { return memory?.() || null } catch { return null } }
   // 下面的 friend 是主动搭话白名单里的 QQ 号，不传就是主人。朋友各有各的状态，素材只看和这个人的私聊、关于这个人的记忆。
   const chatIdOf = (cfg, friend) => `private:${friend || cfg.ownerQQ}`
-  const lastPrivateAt = (cfg, friend) => friend ? (hub?.lastPrivateAt?.(friend) || 0) : Math.max(hub?.lastOwnerChatAt || 0, hub?.lastBotToOwner?.at || 0)
+  const lastPrivateAt = (cfg, friend) => Math.max(
+    life?.lastContactAckAt?.(chatIdOf(cfg,friend))||0,
+    friend ? (hub?.lastPrivateAt?.(friend) || 0) : Math.max(hub?.lastOwnerChatAt || 0, hub?.lastBotToOwner?.at || 0))
   const stateFile = (friend) => dataDir('purpose', ...(friend ? ['friends', `${friend}.json`] : ['purpose-state.json']))
   const nudgeFile = () => dataDir('purpose', 'nudge.json')
 
@@ -290,7 +292,7 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     return life ? life.propose('qq', chatIdOf(getConfig(), options.friend), run).then(result => result?.status === 'deferred' ? { ...result, outcome: 'deferred' } : result) : run()
   }
 
-  async function runAttempt({ reason = '定时', config, state, force = false, friend = '' } = {}) {
+  async function runAttempt({ reason = '定时', config, state, force = false, friend = '', commit } = {}) {
     const cfg = getConfig()
     const now = Date.now()
     ensurePurposeDay(state, now)
@@ -358,29 +360,36 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     const memo = parsePurposeMemo(raw)
     const text = cleanReply(raw, { warn: (message) => log.warn?.(`目的：${message}`) })
     let outcome
-    if (!text) {
-      outcome = genError ? 'failed' : 'silent' // 模型有权跳过（【状态】跳过 / [沉默]），silent 不硬发
-    } else {
+    const ship=async({sendQQ}={})=>{
       const where = friend ? 'qq' : await deliverByCarrier(text, picked.purpose.text, snapshot, () => { if ((hub.lastOwnerChatAt || 0) > lastInputAt) throw Error('目标已继续聊天，本轮不发送') }) // 桌宠气泡只给主人看
       if (where === 'sent') {
-        outcome = 'sent' // dispatch 已推气泡或回落 QQ：正常结算次数与心情
+        return 'sent' // dispatch 已推气泡或回落 QQ：正常结算次数与心情
       } else if (where === 'silent') {
-        outcome = 'silent' // carrier=pet 且关闭回落（或专注模式）：静默，不硬补
+        return 'silent' // carrier=pet 且关闭回落（或专注模式）：静默，不硬补
       } else if (where === 'failed') {
-        outcome = 'delivery-failed' // dispatch 结果不确定：不补发，避免重复
+        return 'delivery-failed' // dispatch 结果不确定：不补发，避免重复
       } else {
         try {
+          if(sendQQ){
+            const r=await sendQQ()
+            if(r.ok)life?.recordNativeSpeech?.(target,r.text,MOOD_PREFIX)
+            return r.ok?'sent':'delivery-failed'
+          }
           // Generated in system:purpose, not in this private chat's agent.
           // Let the host hand the actually delivered text to that chat on its next input.
           const r = await (life ? life.deliver(chatIdOf(cfg, friend), text, { own: false, userText: MOOD_PREFIX }, snapshot, () => { if ((friend ? (hub?.lastPrivateAt?.(friend) || 0) : (hub.lastOwnerChatAt || 0)) > lastInputAt) throw Error('目标已继续聊天，本轮不发送') }) : hub.deliver(chatIdOf(cfg, friend), text, { own: false, userText: MOOD_PREFIX }))
-          outcome = r?.ok === true || (!life && r && r.failed === 0 && !cfg.dryRun) ? 'sent' : 'delivery-failed' // deliver 吞错只返回 undefined / {missedAt}
+          return r?.ok === true || (!life && r && r.failed === 0 && !cfg.dryRun) ? 'sent' : 'delivery-failed' // deliver 吞错只返回 undefined / {missedAt}
         } catch (error) {
-          outcome = 'delivery-failed'
           log.warn?.('目的：投递失败：', error?.message)
+          return 'delivery-failed'
         }
       }
     }
-    applyPurposeOutcome(state, { now: Date.now(), config, outcome, text, memo, planned: picked.purpose })
+    if(!text)outcome=genError?'failed':'silent'
+    else try{outcome=commit?await commit({snapshot,text},ship):await ship()}
+    catch{outcome='delivery-failed'}
+    applyPurposeOutcome(state, { now: Date.now(), config, outcome, text:commit&&outcome!=='sent'?'':text,
+      memo:commit&&outcome!=='sent'?{}:memo, planned: picked.purpose })
     if (!friend) nudgeMood(picked.purpose, outcome)
     saveState(state, friend)
     log.info?.(`目的：回合结束 ${outcome}（今天第 ${state.countToday} 次）`)
@@ -398,33 +407,46 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     try { m.nudge(delta, `主动搭话：${String(purpose?.text || '').slice(0, 20)}`) } catch {}
   }
 
-  // ---------- 追问（沿用旧 speakup 的「轻轻追一句」，不占今日次数） ----------
-  async function maybeNudge(cfg, state, now = Date.now()) {
-    const su = cfg.speakUp || {}
-    if (!su.nudge) return false
-    const lb = hub.lastBotToOwner || { at: 0, text: '' }
-    const quietMs = now - (lb.at || 0)
-    const flag = readJson(nudgeFile(), {})
-    if (!lb.at || lb.at <= (hub.lastOwnerChatAt || 0)) return false
-    if (flag.nudgedFor === lb.at) return false
-    if (!/[？?]|吗|呢|嘛|没$/.test(String(lb.text || '').trim())) return false
-    if (!(quietMs > 15 * MINUTE && quietMs < 40 * MINUTE)) return false
-    writeJson(nudgeFile(), { nudgedFor: lb.at }) // 引擎状态文件会被 normalize 洗字段，追问标记单独存
+  // ---------- 追问（与其他主动联系共用 life-core 尝试额度） ----------
+  const nudgeRecord=(cfg,now)=>{
+    const managed=life?.contactReady?.()
+    if(managed&&Number(cfg.speakUp?.idleMinutes??40)>=40)return null
+    const lb=(managed?life.latestConfirmedSpeech(chatIdOf(cfg)):hub.lastBotToOwner)||{at:0,text:''}
+    const quietMs=now-lb.at
+    return cfg.speakUp?.nudge&&lb.at>Math.max(Number(lb.lastIncomingAt)||0,hub.lastOwnerChatAt||0)&&/[？?]|吗|呢|嘛|没$/.test(String(lb.text||'').trim())&&
+      quietMs>15*MINUTE&&quietMs<40*MINUTE?lb:null
+  }
+  async function runNudge(cfg,lb,commit){
+    const chatId=chatIdOf(cfg),idle=Math.round((Date.now()-lb.at)/MINUTE),owner=cfg.ownerName||'主人'
+    const snapshot=life?.prepareContext?.({chatId,purpose:'proactive',query:lb.text})
+    const confirmed=commit?snapshot?.items?.find(item=>item.type==='utterance'&&item.eventId===lb.eventId):lb
+    if(!confirmed)return {outcome:'skipped-materials'}
+    const prompt=`【系统提醒，不是${owner}说的话】你刚才跟${owner}说「${String(confirmed.text||'').slice(-60)}」，${owner}已经 ${idle} 分钟没回了。可以轻轻追一句（比如「人呢」「睡着啦？」，或者换个话题），别催、别抱怨；觉得${owner}在忙就只回 ${SILENCE}。这一轮不能用工具，直接输出那句话。`
+    const enriched=snapshot?.text?prompt+'\n\n'+snapshot.text:(life?.withExperiences?.(prompt,{chatId,query:''})||prompt)
+    const generate=()=>{const options={system:personaText?.()||'',text:enriched,maxTokens:500,temperature:0.8};return life?.askOnce?life.askOnce('nudge',options,120000):ask(options)}
+    const raw=await(life?life.runContext(snapshot,generate):generate())
+    const text=cleanReply(raw,{warn:message=>log.warn?.(`目的：${message}`)})
+    life?.checkDraft?.(text,snapshot)
+    const beforeSend=()=>{if((hub.lastOwnerChatAt||0)>lb.at)throw Error('目标已继续聊天，本轮不发送')}
+    beforeSend()
+    if(!text)return {outcome:'silent'}
+    const send=async({sendQQ}={})=>{
+      if(sendQQ){const r=await sendQQ();if(r.ok)life?.recordNativeSpeech?.(chatId,r.text,MOOD_PREFIX);return r}
+      return life?life.deliver(chatId,text,{own:false,userText:MOOD_PREFIX},snapshot,beforeSend):hub.deliver(chatId,text,{own:false,userText:MOOD_PREFIX})
+    }
+    const result=commit?await commit({snapshot,text},send):await send()
+    return {outcome:result?.ok?'sent':'delivery-failed'}
+  }
+  async function maybeNudge(cfg, now = Date.now()) {
+    const lb=nudgeRecord(cfg,now)
+    const identity=lb?.messageId||lb?.at
+    if(!lb||readJson(nudgeFile(),{}).nudgedFor===identity)return false
+    writeJson(nudgeFile(), { nudgedFor: identity }) // 引擎状态文件会被 normalize 洗字段，追问标记单独存
     if (Math.random() >= 0.5) return true
-    const idle = Math.round(quietMs / MINUTE)
-    const owner = cfg.ownerName || '主人'
-    const prompt = `【系统提醒，不是${owner}说的话】你刚才跟${owner}说「${String(lb.text || '').slice(-60)}」，${owner}已经 ${idle} 分钟没回了。可以轻轻追一句（比如「人呢」「睡着啦？」，或者换个话题），别催、别抱怨；觉得${owner}在忙就只回 ${SILENCE}。这一轮不能用工具，直接输出那句话。`
     try {
-      const attempt = async () => {
-      const snapshot = life?.prepareContext?.({chatId:chatIdOf(cfg),purpose:'proactive',query:lb.text})
-      const enriched = snapshot?.text ? prompt + '\n\n' + snapshot.text : (life?.withExperiences?.(prompt,{chatId:chatIdOf(cfg),query:''}) || prompt)
-      const generate = () => { const options={system:personaText?.() || '',text:enriched,maxTokens:500,temperature:0.8}; return life?.askOnce ? life.askOnce('nudge',options,120000) : ask(options) }
-      const raw = await (life ? life.runContext(snapshot, generate) : generate())
-      const text = cleanReply(raw, { warn: (message) => log.warn?.(`目的：${message}`) })
-      life?.checkDraft?.(text, snapshot)
-      if ((hub.lastOwnerChatAt || 0) > (lb.at || 0)) throw Error('目标已继续聊天，本轮不发送')
-      if (text) return life ? life.deliver(chatIdOf(cfg), text, { own: false, userText: MOOD_PREFIX }, snapshot, () => { if ((hub.lastOwnerChatAt || 0) > (lb.at || 0)) throw Error('目标已继续聊天，本轮不发送') }) : hub.deliver(chatIdOf(cfg), text, { own: false, userText: MOOD_PREFIX })
-      }
+      const queued=life?.queueContact?.({job:'nudge',key:'nudge-'+identity,target:chatIdOf(cfg),expiresAt:Math.floor(lb.at+40*MINUTE)})
+      if(queued)return true
+      const attempt=()=>runNudge(cfg,lb)
       if (life) await life.propose('qq', chatIdOf(cfg), attempt)
       else await attempt()
     } catch (error) {
@@ -434,11 +456,25 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
   }
 
   // ---------- 对外 ----------
+  function contactAllowed(target){
+    const cfg=getConfig(),uid=target.slice(8)
+    return purposeConfig(cfg).enabled&&!!cfg.ownerQQ&&!isMuted?.(target)&&
+      (uid===String(cfg.ownerQQ)||(cfg.speakUp?.allow||[]).map(String).includes(uid)&&!memoryOf()?.dislikes?.(uid))
+  }
+  const contactJob={id:'contact',kind:'contact',canRun:row=>contactAllowed(row.target),
+    run(row,commit){
+      const cfg=getConfig(),config=purposeConfig(cfg),uid=row.target.slice(8),friend=uid===String(cfg.ownerQQ)?'':uid
+      return runAttempt({reason:friend?'定时（白名单）':'定时',config,state:loadState(config,Date.now(),friend),friend,commit})
+    }}
+  const nudgeJob={id:'nudge',kind:'contact',canRun(row){
+      const cfg=getConfig(),lb=nudgeRecord(cfg,Date.now())
+      return row.target===chatIdOf(cfg)&&contactAllowed(row.target)&&!!lb?.messageId&&row.jobKey==='nudge-'+lb.messageId
+    },run(row,commit){const cfg=getConfig();return runNudge(cfg,nudgeRecord(cfg,Date.now()),commit)}}
   /** 到点就跑一轮，跑了返回 true。 */
   async function tickOne(cfg, config, friend = '') {
     const now = Date.now()
     const state = loadState(config, now, friend)
-    if (!friend && await maybeNudge(cfg, state, now)) return true
+    if (!friend && await maybeNudge(cfg, now)) return true
     const env = {
       enabled: true, modeOk: true, dshReady: true, paused: false, ownerAllowed: true,
       busy: false, friendOk: true, budgetBlocked: false, // Aurabot 无 token 预算/好友探测服务，恒可用（留 env 位）
@@ -454,6 +490,10 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
       saveState(state, friend)
       return false
     }
+    const quota=life?.proactiveState?.()
+    if(quota?.shared&&(now<quota.nextAt||quota.count>=Number(cfg.speakUp?.maxPerDay??10)))return true
+    const queued=life?.queueContact?.({job:'contact',key:'slot-'+Math.floor(now/MINUTE),target:chatIdOf(cfg,friend),expiresAt:now+15*MINUTE})
+    if(queued)return queued.ok
     await runOnce({ reason: friend ? '定时（白名单）' : '定时', config, state, friend })
     return true
   }
@@ -560,7 +600,7 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     return `（你最近心里比较想要：${top.map((t) => t.label).join('、')}。它会自然影响你想聊什么，不用说出来。）`
   }
 
-  return { tick, fire, state, status, preview, run: fire, drivesRule }
+  return { tick, fire, state, status, preview, run: fire, drivesRule,lifeJobs:()=>[contactJob,nudgeJob] }
 }
 
 export function bindApi(api) {

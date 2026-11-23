@@ -9,7 +9,7 @@ export function harness(t,{directory,rows=[],lib,now}={}) {
  const cfg={enabled:true,dryRun:false,ownerQQ:'10001',botQQ:'10002',allow:{groups:['20001'],private:['10003']},ext:{},modules:{},diary:{sourceGroups:[]}}
  const chatOfSession=id=>({owner:'private:10001',guest:'private:10003',group:'group:20001',purpose:'system:purpose'})[String(id).replace(/^session-/,'')]||''
  const on=(map,n,f)=>{const a=map.get(n)||[];a.push(f);map.set(n,a);return()=>{const i=a.indexOf(f);if(i>=0)a.splice(i,1)}}
- const emit=(n,...args)=>{let value=args[0];for(const f of events.get(n)||[]){const r=f(value,...args.slice(1));if(r!==undefined)value=r}return value}
+ const emit=(n,...args)=>{let value=args[0];for(const f of events.get(n)||[]){const r=f(value,...args.slice(1));if(n==='send'&&r===null)return null;if(r!==undefined)value=r}return value}
  let reset=[]
  modules['history-vault']={
   timelinePage:({afterId=0,limit=200}={})=>{const all=rows.filter(r=>r.sequence>afterId),page=all.slice(0,limit);return{rows:page,nextId:page.at(-1)?.sequence||afterId,hasMore:page.length<all.length}},

@@ -10,7 +10,7 @@ const capabilityLabel=id=>({web_search:'搜索网页',web_fetch:'读取网页',b
 const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子正文','video-metadata':'视频资料','web-body':'网页正文','search-summary':'搜索摘要','confirmed-speech':'已发送原话','qq-ack':'QQ 回执',provider:'模块结果',note:'笔记',tool:'工具结果','tool-result':'工具结果'}[id]||id)
 const candidateTarget=c=>c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
 const candidateName=c=>({space:'空间日记',journal:'私人日记'}[candidateTarget(c)]||
- (c.module==='tieba-reader'&&c.job==='share'?'贴吧分享':c.module+' / '+c.job))
+ ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'

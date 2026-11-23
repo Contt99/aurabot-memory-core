@@ -32,7 +32,7 @@ export async function modelRequest(h,session,msgs) {
  return request
 }
 
-export function makeHost(t,{sdk,rows=[],directory,model,items,send,now}) {
+export function makeHost(t,{sdk,rows=[],directory,model,items,send,afterSendFilter,now}) {
  const lib=name=>{assert.equal(name,'security/leak-guard.js');return sdk.capture}
  const h=harness(t,{lib,rows,directory,now}), dispatched=[], checks=[]
  Object.assign(h.cfg,{ownerLevel:'social',workspaceDir:path.join(process.env.AURABOT_DATA_DIR,'workspace'),
@@ -60,10 +60,12 @@ export function makeHost(t,{sdk,rows=[],directory,model,items,send,now}) {
     return content
    },
    sent:(segments,info)=>h.emit('sent',segments,info),
-   send:(segments,info)=>{
+   send:async(segments,info)=>{
     const decision=h.emit('send',segments,info)
     checks.push({decision,source:sdk.capture.currentPromptSources()})
-    send?.(decision);return decision
+    send?.(decision)
+    await afterSendFilter?.(h,decision)
+    return decision
    },items:items?async list=>{await items(h);return list}:undefined
   }
  })

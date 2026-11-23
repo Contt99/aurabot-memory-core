@@ -14,6 +14,7 @@ export function createCandidateQueue(db,now){
  const parse=r=>r?{...r,sourceIds:JSON.parse(r.sourceIds)}:null
  const get=id=>parse(db.prepare('SELECT * FROM life_candidates WHERE id=?').get(id))
  const byKey=({module,job,key,target})=>parse(db.prepare('SELECT * FROM life_candidates WHERE module=? AND job=? AND jobKey=? AND target=?').get(module,job,key,target))
+ const pending=({module,job,target})=>parse(db.prepare("SELECT * FROM life_candidates WHERE module=? AND job=? AND target=? AND status IN ('queued','running','sending') AND expiresAt>? ORDER BY createdAt LIMIT 1").get(module,job,target,now()))
  const update=(id,from,to,reason=null)=>db.prepare('UPDATE life_candidates SET status=?,updatedAt=?,reason=? WHERE id=? AND status=?').run(to,now(),reason,id,from).changes===1
  function submit(spec){
   const before=byKey(spec)
@@ -52,11 +53,12 @@ export function createCandidateQueue(db,now){
   const clear=db.prepare("UPDATE life_candidates SET sourceIds='[]',receipt=CASE WHEN status='saved' THEN NULL ELSE receipt END,status=CASE WHEN status IN ('queued','running') THEN 'cancelled' ELSE status END,reason=CASE WHEN status IN ('queued','running','saved') THEN 'forgotten' ELSE reason END,updatedAt=CASE WHEN status IN ('queued','running') THEN ? ELSE updatedAt END WHERE id=?")
   for(const id of touched)clear.run(now(),id)
  }
- return {get,byKey,submit,ready,claim,sending,ack,confirm,forget,
+ return {get,byKey,pending,submit,ready,claim,sending,ack,confirm,forget,
   bindSources:(id,sourceIds)=>db.prepare("UPDATE life_candidates SET sourceIds=? WHERE id=? AND status='running'").run(JSON.stringify([...new Set(sourceIds)]),id).changes===1,
   cancel:(id,reason)=>update(id,'queued','cancelled',reason)||update(id,'running','cancelled',reason),
   finish:(id,status,reason)=>status==='unknown'?update(id,'sending',status,reason):update(id,'running',status,reason)||(status==='not-sent'&&update(id,'sending',status,reason)),
   count:({module,job,target,from})=>db.prepare("SELECT COUNT(*) n FROM life_candidates WHERE module=? AND job=? AND target=? AND status='sent' AND updatedAt>=?")
    .get(module,job,target,from).n,
+  latestSentAt:(module,target)=>db.prepare("SELECT MAX(updatedAt) n FROM life_candidates WHERE module=? AND target=? AND status='sent'").get(module,target).n||0,
   recent:()=>db.prepare('SELECT * FROM life_candidates ORDER BY createdAt DESC,rowid DESC LIMIT 30').all().map(parse)}
 }
