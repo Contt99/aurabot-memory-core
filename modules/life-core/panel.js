@@ -10,7 +10,8 @@ const capabilityLabel=id=>({web_search:'搜索网页',web_fetch:'读取网页',b
 const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子正文','video-metadata':'视频资料','web-body':'网页正文','search-summary':'搜索摘要','confirmed-speech':'已发送原话','qq-ack':'QQ 回执',provider:'模块结果',note:'笔记',tool:'工具结果','tool-result':'工具结果'}[id]||id)
 const candidateTarget=c=>c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
 const candidateName=c=>({space:'空间日记',journal:'私人日记'}[candidateTarget(c)]||
- ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问'}[c.module+'/'+c.job]||c.module+' / '+c.job))
+ ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问',
+  'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
@@ -180,6 +181,12 @@ function Panel(){
  function renderHealth(){
   const tasks=memory?.tasks||[],timelineTasks=items.filter(r=>r.type==='task'||r.type==='commitment')
   const candidates=candidateResource.data?.items
+  const coverage=state?.coverage
+  const coverageLabels={managed:'统一调度与回执','clock-only':'只接管到期检查',observed:'只观测结果',outside:'仍走原入口','not-loaded':'未加载'}
+  const coverageRows=rows=>h('ul',{className:'lc-list'},...rows.map(r=>h('li',{key:r.id},
+   h('div',{style:flow},h('strong',null,r.label),pill(coverageLabels[r.mode]||'未识别')),
+   meta([r.switchState==='off'?'设置关闭':'',r.window,r.checkMinutes?'每 '+r.checkMinutes+' 分钟检查':'',r.lastCheckAt?'上次检查 '+dateLabel(r.lastCheckAt):''].filter(Boolean).join(' · ')),
+   r.note?paragraph(r.note):null)))
   return h('div',null,
    h('section',{style:box},h('h3',null,'记忆健康'),resourceMessage(memoryResource,'记忆状态'),memory?h('div',null,
     paragraph('统一编排：'+(memory.managed?'已接管普通聊天':'未接管普通聊天，当前为降级状态')),
@@ -192,13 +199,21 @@ function Panel(){
     state?.schedules?.length?fine('统一调度已登记的到期检查（'+state.schedules.length+'项）',
      paragraph('到期检查不等于工具已执行；实际结果见最近经历。'),
      h('ul',{className:'lc-list'},...state.schedules.map(s=>h('li',{key:s.module+':'+s.id},h('strong',null,s.label),meta(({waiting:'待首次检查',checking:'检查中',checked:'已检查','check-failed':'检查失败'}[s.status]||'状态未知')+(s.checkedAt?' · '+dateLabel(s.checkedAt):'')))))):null,
-    paragraph('入口覆盖清单：当前接口未提供，不能据此判断每个后台入口均已接入。'),paragraph('最近写入成功时间：当前接口未提供。')),
+    !coverage?paragraph('入口覆盖清单：当前接口未提供，不能据此判断每个后台入口均已接入。'):null),
    h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('这里只显示经持久队列处理的行动。看回执可确认实际发布、发送或服务器保存。'),
     resourceMessage(candidateResource,'后台回执'),
     candidates?.length?h('ul',{className:'lc-list'},...candidates.map(c=>h('li',{key:c.id},
      h('div',{style:flow},h('strong',null,candidateName(c)),pill(candidateLabel(c),c.status==='sent'||c.status==='saved'&&c.receipt?'live':undefined)),
      meta([dateLabel(c.updatedAt),candidateDetail(c)||(c.status==='queued'?'有效至 '+dateLabel(c.expiresAt):'')].filter(Boolean).join(' · ')),
      fine('查看行动来源',paragraph('目标：'+c.target),paragraph('候选ID：'+c.id),sourceLine(c.sourceIds,'关联经历'))))):candidates?empty('还没有通过核心排队的后台行动。'):null),
+   coverage?h('section',{style:box},h('h3',null,'入口覆盖与时段'),
+    paragraph('按当前宿主加载的接口判断；开关、时段及检查频率不代表动作会执行。时段：'+coverage.timezone+'（贴吧使用北京时间）。'),
+    coverage.coreEnabled===false?h('p',{role:'alert'},'行动核心当前关闭；已接入的入口不执行。'):null,
+    coverage.conflicts?.length?h('ul',{className:'lc-list'},...coverage.conflicts.map(s=>h('li',{key:s},s))):null,
+    ...['managed','clock-only','observed','outside','not-loaded'].flatMap(mode=>{
+     const rows=coverage.entries.filter(r=>r.mode===mode)
+     return rows.length?[fine(coverageLabels[mode]+'（'+rows.length+'）',coverageRows(rows))]:[]
+    })):null,
    h('section',{style:box},h('h3',null,'承诺与任务'),paragraph('口头承诺不等于工具已启动；下方按实际持久请求或已确认表达显示状态。'),
     ...tasks.map(t=>h('div',{key:t.id,style:{padding:'12px 0',borderBottom:'1px solid #8884'}},h('strong',null,statusLabel(t.status)),paragraph(t.goal||'未提供任务目标'),t.message?paragraph(t.message):null,paragraph('任务ID：'+t.id+' · '+(t.chatId||'未指定聊天')),paragraph('记于 '+dateLabel(t.at)),t.dueAt?paragraph('计划时间：'+dateLabel(t.dueAt)):null,t.updatedAt?paragraph('更新于 '+dateLabel(t.updatedAt)):null)),
     !tasks.length?paragraph('接口未返回当前任务 / 承诺记录；不代表没有未完成事项。'):null,

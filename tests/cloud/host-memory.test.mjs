@@ -19,6 +19,7 @@ import {bindApi as bindQzone,createQzone} from '../../modules/diary/lib/features
 import {createLifeAdapter as diaryAdapter} from '../../modules/diary/life.mjs'
 import {createPrivateJournal,journalDate} from '../../modules/autonomy/lib/private-journal.mjs'
 import purposeDefinition from '../../modules/purpose/index.mjs'
+import speakupDefinition from '../../modules/speakup/index.mjs'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -31,6 +32,36 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ test('installed hub: legacy scheduler uses an isolated one-shot request and preserves native private speech',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'speakup-candidate-'))
+  const requests=[],turns=[]
+  const {h,hub,dispatched}=makeHost(t,{sdk,rows:[message(1,'今天想聊纸风车'),message(2,'OTHER_PRIVATE_STUB','in','private:10003')],model:p=>turns.push(p)})
+  h.cfg.speakUp={enabled:true,awakeFrom:0,awakeTo:24,idleMinutes:0,minIntervalMinutes:1}
+  h.cfg.ext.purpose={enabled:false}
+  h.api.core.mutes={muted:()=>false}
+  h.modules['life-core']=h.core
+  h.api.core.modules={status:()=>[{id:'speakup',running:'user'}]}
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const libs=Object.fromEntries(await Promise.all(['core/store.js','core/llm.js','core/text.js','core/offpeak.js']
+   .map(async p=>[p,await import(pathToFileURL(path.join(source,p)))])))
+  const entry=h.modules.speakup=speakupDefinition.setup({...h.api,id:'speakup',lib:p=>libs[p],ask:o=>askModel({llm:{
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){
+    requests.push(opt)
+    yield* await h.stream(Object.freeze(opt),[{type:'text-delta',text:'纸风车的话题要接着聊吗？'},{type:'finish',reason:{kind:'stop'}}])
+   }
+  }},{...o,model:{provider:'fixture',model:'fixture'}})})
+  assert.equal(h.core.ownsSchedule('speakup','contact-tick'),true)
+  await entry.tick();await h.timers.get('统一后台调度')()
+  assert.equal(turns.length,0)
+  assert.equal(dispatched.length,1)
+  assert.match(JSON.stringify(requests[0].messages),/纸风车/)
+  assert.doesNotMatch(JSON.stringify(requests[0].messages),/OTHER_PRIVATE_STUB/)
+  assert.equal(h.routes.get('/candidates')({headers:{host:'localhost'}}).items[0].receipt,'1')
+  await hub.pushToSession(chat,[{type:'text',text:'好啊，接着聊。'}],chat.userId)
+  assert.match(JSON.stringify(turns[0].messages),/纸风车的话题要接着聊吗/)
+ })
 
  for(const withdraw of [false,true])test('installed hub: purpose candidate '+(withdraw?'honors a forget after an async outbound filter':'persists a native QQ receipt'),async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'purpose-candidate-'))
@@ -112,6 +143,10 @@ if(!source) {
   const requests=[]
   // The first scheduler check is intentionally one minute after startup.
   let now=Date.now()
+  // This is the positive receipt case, not the midnight-expiry case. Keep the
+  // synthetic scheduler's two ticks on one Beijing date even near 00:00.
+  const sh=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'})
+  if(sh.format(now)!==sh.format(now+120_000))now+=120_000
   const {h,hub,dispatched}=makeHost(t,{sdk,model:async req=>requests.push(req),now:()=>now})
   const root=h.dir
   h.modules['life-core']=h.core

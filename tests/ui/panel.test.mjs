@@ -107,3 +107,15 @@ test('diary receipts identify the destination without showing private writing',a
  assert.match(ui.text(),/私人日记.*已保存到服务器.*本地记录 journal:1/)
  assert.doesNotMatch(ui.text(),/私密正文|QQ 回执 space001/)
 })
+
+test('health shows clock-only coverage without counting it as full dispatch',async()=>{
+ const ui=mount({'/state':{...fixtures['/state'],coverage:{timezone:'Asia/Shanghai',conflicts:['追问窗口与配置冲突'],entries:[
+  {id:'a',label:'旧主动搭话',mode:'managed',switchState:'off',window:'18:00–23:00'},
+  {id:'b',label:'B 站定时',mode:'clock-only',switchState:'unknown',note:'平台写入仍走原模块'}
+ ]}}})
+ await ui.settle();await ui.click('任务与健康')
+ assert.match(ui.text(),/入口覆盖与时段/)
+ assert.match(ui.text(),/旧主动搭话.*统一调度与回执.*设置关闭.*18:00/)
+ assert.match(ui.text(),/B 站定时.*只接管到期检查.*平台写入仍走原模块/)
+ assert.match(ui.text(),/追问窗口与配置冲突/)
+})

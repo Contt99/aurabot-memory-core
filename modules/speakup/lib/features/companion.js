@@ -1,4 +1,5 @@
 // 陪伴类小功能：心情、主动搭话。
+import {createManagedSpeakUp} from '../../managed.mjs'
 
 let dataDir, readJson, writeJson
 let askModel
@@ -163,10 +164,11 @@ export function createMood({ getConfig, dsh, log }) {
 
 // ---------------- 主动搭话 ----------------
 
-export function createSpeakUp({ getConfig, hub, log, isMuted, memory, life }) {
+export function createSpeakUp({ getConfig, hub, log, isMuted, memory, life,ask,personaText,autonomyAllowed }) {
   const file = () => dataDir('speakup.json')
   const load = () => readJson(file(), () => ({ day: '', count: 0, nextAt: 0, last: 0 }))
   const save = (s) => writeJson(file(), s)
+  const managed=createManagedSpeakUp({getConfig,hub,log,isMuted,memory,life,ask,personaText,autonomyAllowed,load,save})
 
   function schedule(s, cfg) {
     const min = cfg.minIntervalMinutes
@@ -251,6 +253,7 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory, life }) {
   }
 
   async function tick() {
+    if(life?.contactReady?.())return managed.tick()
     const cfg = getConfig()
     const c = cfg.speakUp
     if (!cfg.enabled || !c.enabled) return
@@ -288,7 +291,8 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory, life }) {
     if (!(await tickFriends(cfg, s))) save(s)
   }
 
-  return { tick, fire, state: () => { const raw=load(), shared=life?.proactiveState?.(); return shared?{...raw,...shared,shared:true}:raw } }
+  return { tick, fire, autonomous:managed.autonomous,lifeJobs:()=>managed.jobs,
+    state: () => { const raw=load(), shared=life?.proactiveState?.(); return shared?{...raw,...shared,shared:true}:raw } }
 }
 
 export function bindApi(api) {

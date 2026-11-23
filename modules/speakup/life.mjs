@@ -32,6 +32,15 @@ export function createLifeAdapter(api) {
     },
     available: () => Boolean(core()?.propose),
     proactiveState: () => core()?.proactiveState?.(),
+    contactReady:()=>core()?.supportsContactJob?.(api.id,'contact')===true,
+    queueContact:spec=>core()?.queueCandidate?.({module:api.id,...spec}),
+    latestConfirmedSpeech:chatId=>core()?.latestConfirmedSpeech?.(chatId),
+    lastContactAckAt:chatId=>core()?.lastContactAckAt?.(chatId)||0,
+    recordNativeSpeech(chatId,text,userText){
+      if(!text)return
+      try{api.core.hub.logChat?.(chatId,'bot',text);api.emit?.('activity',{kind:'out',chatId,reply:text,userText})}
+      catch{api.log.warn?.('主动搭话：QQ 已确认送达，旧流水或心情活动未补写')}
+    },
     perform(action, run, meta = {}) {
       const c = core()
       if (c?.perform) return c.perform({ module: api.id, action, evidenceType: 'provider', public: false, ...meta }, run)

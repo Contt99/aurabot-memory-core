@@ -15,8 +15,9 @@ import {createScheduleDispatcher} from './lib/schedule-dispatch.mjs'
 import {createCandidateQueue,nativeAck} from './lib/candidate-queue.mjs'
 import {createDiaryDispatch,diaryKinds,diaryTarget,isDiaryJob} from './lib/diary-dispatch.mjs'
 import {createContactDispatch,isContactJob} from './lib/contact-dispatch.mjs'
+import {actionCoverage} from './lib/coverage.mjs'
 
-const VERSION='0.2.0-local.10'
+const VERSION='0.2.0-local.11'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -182,7 +183,7 @@ export default {
    if(api.core.mutes?.muted?.(recipient)) return defer('目标私聊已静音')
    if(!candidate&&context.getStore()?.proactiveTarget===recipient)return typeof run==='function'?run():defer('没有执行器')
    if(qqBusy) return defer('另一条主动触达正在处理')
-   const hub=api.core.hub,confirmed=candidates.latestSentAt('purpose',recipient)
+   const hub=api.core.hub,confirmed=lastContactAckAt(recipient)
    const last=Math.max(confirmed,Number(hub.lastPrivateAt?.(uid))||0,...(uid===String(c.ownerQQ)?[Number(hub.lastOwnerChatAt)||0,Number(hub.lastBotToOwner?.at)||0]:[]))
    if(t-last<Number(s.idleMinutes??40)*60000) return defer('主人最近仍在聊天')
    const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(t)
@@ -221,7 +222,9 @@ export default {
      : sourceIds.length||(provider.kind==='contact'?!qqScope(target):target!==diaryTarget(provider.kind,cfg(),api.core.hub))))
     return{ok:false,status:'unavailable',message:'候选任务或证据尚未授权'}
    const spec={module,job,key,target,sourceIds,expiresAt}
-   const row=(provider.kind==='contact'&&candidates.pending(spec))||candidates.submit(spec)
+   // Only repeated regular timer checks can coalesce. A wake or native
+   // question has its own identity; its result must never attach to another.
+   const row=(provider.kind==='contact'&&job==='contact'&&candidates.pending(spec))||candidates.submit(spec)
    return{ok:true,id:row.id,status:row.status}
   }
   async function runDiaryCandidate(spec){
@@ -373,11 +376,19 @@ export default {
   })
   api.route('/telemetry',()=>({ok:true,...telemetry.snapshot()}))
   const proactiveState=()=>{const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(now()),s=ledger.kv('proactive',{day,count:0,nextAt:0});return{...s,day,count:s.day===day?s.count:0,shared:true}}
-  api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),schedules:dispatcher.inventory(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
+  function lastContactAckAt(target){
+   return !disposed&&authorizedChat(cfg(),target)?Math.max(candidates.latestSentAt('purpose',target),candidates.latestSentAt('speakup',target)):0
+  }
+  api.route('/state',()=>{
+   const schedules=dispatcher.inventory(),config=cfg()
+   return {ok:true,version:VERSION,capabilities:capabilities(),schedules,observer:observer.available,
+    coverage:actionCoverage({api,config,schedules,candidateJob,observing:observer.available,coreEnabled:active()}),
+    proactive:ledger.kv('proactive'),sources:{public:sourceGroups(config,'public'),private:sourceGroups(config,'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}
+  })
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
   return {version:VERSION,capabilities,execute,perform,performEvidence,propose:request=>propose(request),queueCandidate,runDiaryCandidate,candidateSentCount:candidates.count,
-   lastContactAckAt:target=>!disposed&&authorizedChat(cfg(),target)?candidates.latestSentAt('purpose',target):0,
+   lastContactAckAt,supportsContactJob:(module,job)=>isContactJob(module,job,'contact'),
    candidateStatus:spec=>!disposed?candidates.byKey(spec)?.status:undefined,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }
 }

@@ -382,7 +382,7 @@ export function parsePersonaMbti(md) {
 export default {
   id: 'autonomy',
   name: '自主生活 · 真实探索与私人日记',
-  version: '0.7.0-life.7',
+  version: '0.7.0-life.8',
   api: 1,
   description: '她自己决定这一刻做什么、下次什么时候醒；间隔按区间随机并受时段活跃度影响。不执行 shell 命令',
   panel: 'panel.js',
@@ -603,10 +603,19 @@ export default {
     async function act(d, explorationDeadline, request, context, wakeKey, manual) {
       if (d.action === 'speak') {
         const target = api.use('speakup');
-        const executor = target?.fire;
-        if (typeof executor !== 'function') return { note: '执行模块不可用，本轮未完成', extra: { ok: false, status: 'unavailable' } };
+        const executor = target?.autonomous;
+        const managed=api.use('life-core')?.supportsContactJob?.('speakup','autonomy')===true;
+        if(managed&&typeof executor==='function'){
+          const candidate=await executor(wakeKey);
+          const queued=candidate?.status==='queued';
+          return {note:queued?'主动搭话已交给行动核心，尚未发送':candidate?.message||'主动搭话未登记',
+            extra:{ok:false,status:candidate?.status||'unavailable',candidateId:candidate?.id}};
+        }
+        if(!manual)return {note:'统一主动搭话出口未加载，本轮未完成',extra:{ok:false,status:'unavailable'}};
+        const legacy = target?.fire;
+        if (typeof legacy !== 'function') return { note: '执行模块不可用，本轮未完成', extra: { ok: false, status: 'unavailable' } };
         // The formal adapter owns perform/propose; do not recursively schedule here.
-        const r = await target.fire('自己想起来');
+        const r = await legacy('自己想起来');
         const ok = r?.ok === true && !r.dryRun && !r.simulated && r.status !== 'deferred';
         return { note: r?.message || (ok ? '执行器已确认完成' : '执行器未确认成功，本轮未完成'), extra: { ok, status: r?.status || (ok ? 'ok' : 'unconfirmed') } };
       }
@@ -736,7 +745,8 @@ export default {
       const recalled = context.text ? null : core?.recall?.({chatId:'',purpose:'autonomy',query:'',limit:5});
       const hints = context.text ? [context.text] : recalled ? [recalled.text] : await recallHints(6);
       const menu = ['rest', 'think'];
-      if (!request && api.use('speakup')?.fire) menu.push('speak');
+      const speakup=api.use('speakup'),managedContact=core?.supportsContactJob?.('speakup','autonomy')===true&&typeof speakup?.autonomous==='function';
+      if(!request&&(managedContact||manual&&typeof speakup?.fire==='function'))menu.push('speak');
       if (!request && core?.diarySources) menu.push('diary');
       if (!request && api.use('imagegen')?.generate) menu.push('draw');
       if (!request && c.allowNewMod) menu.push('newmod');
@@ -823,6 +833,7 @@ export default {
         detail: d.detail || (d.steps && d.steps.length ? d.steps.join('\n───\n') : ''),
         note: result.note,
         output: result.extra && result.extra.output ? String(result.extra.output).slice(0, 600) : '',
+        ...(result.extra?.candidateId&&{candidateId:result.extra.candidateId}),
         nextMinutes: delay,
       });
 
@@ -1013,7 +1024,7 @@ export default {
 
     api.route('/state', async () => ({ ok: true, ...snapshot(), capabilities: await (api.use('life-core')?.capabilities?.() || []) }));
     api.route('/grounding', async () => {
-      try { return { ok: true, version: '0.7.0-life.7', ...await groundedDiary.sources() }; }
+      try { return { ok: true, version: '0.7.0-life.8', ...await groundedDiary.sources() }; }
       catch (e) { return { ok: false, message: e.message }; }
     });
     api.route('/diary/preview', async (req) => {
@@ -1040,6 +1051,7 @@ export default {
       return { ok: true };
     });
 
-    return { wake: request => wake(request, true), state: snapshot, activity: () => readLog(200), journal: groundedDiary, requestState:explorationRequest.state,lifeSchedules:()=>[wakeClock],lifeJobs:()=>[groundedDiary.job] };
+    return { wake: request => wake(request, true), state: snapshot, activity: () => readLog(200), journal: groundedDiary, requestState:explorationRequest.state,lifeSchedules:()=>[wakeClock],lifeJobs:()=>[groundedDiary.job],
+      canSpeak:()=>{try{assertActive();return withinWakeHours(cfg())}catch{return false}} };
   },
 };

@@ -1,6 +1,7 @@
 import {nativeAck} from './candidate-queue.mjs'
 
-export const isContactJob=(module,id,kind)=>kind==='contact'&&module==='purpose'&&['contact','nudge'].includes(id)
+export const isContactJob=(module,id,kind)=>kind==='contact'&&(
+ module==='purpose'&&['contact','nudge'].includes(id)||module==='speakup'&&['contact','nudge','autonomy'].includes(id))
 
 // Ordinary manual delivery is unchanged. A scheduled contact gets a durable
 // gate at the existing host transport boundary, with native receipts observed
