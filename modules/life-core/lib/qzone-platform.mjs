@@ -1,7 +1,7 @@
 const JOBS=new Set(['like','comment','reply'])
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,96}$/.test(value)
 const account=value=>/^\d{4,13}$/.test(String(value??''))
-const sticky=(parent,last)=>'r'+parent.length+'-'+parent+'-'+last
+const sticky=(parent,last,level)=>(level==='child'&&parent===last?'r-child-':'r')+parent.length+'-'+parent+'-'+last
 const list=value=>Array.isArray(value)?value:[]
 
 // Own the provider mutation, not a caller-supplied closure. Only an installed
@@ -32,16 +32,17 @@ export function createQzonePlatform({api,candidates,now,cfg,active,disposed,slee
    if(source.meta.action!=='post-read'||source.meta.arguments?.tid!==spec.postId||source.meta.arguments?.targetUin)return null
    const parent=list(source.result?.comments).find(c=>String(c?.comment_id??'')===spec.parentId)
    if(!parent)return null
-   const replied=spec.parentId===spec.replyId?parent:list(parent.replies).find(r=>String(r?.comment_id??'')===spec.replyId)
+   const replied=spec.replyLevel==='parent'&&spec.parentId===spec.replyId?parent:
+    spec.replyLevel==='child'?list(parent.replies).find(r=>String(r?.comment_id??'')===spec.replyId):null
    if(!replied)return null
    const posts=readSource(spec.detailSourceId)
    if(posts?.meta.action!=='own-posts-read')return null
    const post=list(posts.result?.msglist).find(p=>p?.tid===spec.postId)
    if(!post)return null
-   return {key:sticky(spec.parentId,spec.replyId),detailId:posts.id,who:replied.name,post:post.content}
+   return {key:sticky(spec.parentId,spec.replyId,spec.replyLevel),detailId:posts.id,who:replied.name,post:post.content}
   }
   if(source.meta.action!=='feed-read')return null
-  const post=list(source.result?.feeds).find(f=>f?.appid===311&&String(f.uin)===targetUin&&f.key===spec.postId)
+  const post=list(source.result?.feeds).find(f=>f?.appid===311&&String(f.uin)===targetUin&&f.tid===spec.postId)
   if(!post||!Number.isFinite(Number(post.time))||Number(post.time)*1000<now()-86400_000)return null
   let detail=null
   if(spec.detailSourceId){

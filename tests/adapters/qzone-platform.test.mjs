@@ -4,7 +4,7 @@ import {fixture} from './legacy-adapters-fixture.mjs'
 import {harness} from '../core/harness.mjs'
 import definition from '../../modules/qzone-social/index.mjs'
 
-function setup(t,{responses={like_qzone:null,comment_qzone:{comment_id:'51'}},afterModel=()=>{},classifyError}={}){
+function setup(t,{responses={like_qzone:null,comment_qzone:{comment_id:'51'}},afterModel=()=>{},classifyError,tid='post-A'}={}){
  const legacy=fixture();t.after(legacy.close)
  const h=harness(t,{lib:key=>key==='onebot/client.js'?{isDefiniteFailure:classifyError}:undefined})
  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0,maxPerDay:10}
@@ -15,7 +15,7 @@ function setup(t,{responses={like_qzone:null,comment_qzone:{comment_id:'51'}},af
  h.api.core.onebot={call:async(action,params,options)=>{
   if(action.startsWith('get_'))reads.push(action)
   else writes.push({action,params,options,state:h.routes.get('/candidates')({headers:{host:'localhost'}}).items.find(c=>c.status==='sending')})
-  if(action==='get_qzone_feeds')return {feeds:[{appid:311,uin:77777,key:'post-A',time:Math.floor(Date.now()/1000),html:'纸风车',nickname:'朋友'}]}
+  if(action==='get_qzone_feeds')return {feeds:[{appid:311,uin:77777,key:'feed-A',tid,time:Math.floor(Date.now()/1000),html:'纸风车',nickname:'朋友'}]}
   if(action==='get_qzone_msg_detail')return {tid:params.tid,content:'今天试做了一个纸风车。',comments:[]}
   if(action==='get_qzone_msg_list')return {msglist:[]}
   if(responses[action] instanceof Error)throw responses[action]
@@ -37,6 +37,7 @@ test('space timer uses distinct durable like/comment attempts and trusts only th
  for(const w of f.writes){
   assert(w.state,'running write must already be durable')
   assert.equal(w.options.retries,0)
+  assert.equal(w.params.tid,'post-A')
  }
  assert.deepEqual(f.recent().map(r=>r.status),['sent','sent'])
  assert.equal(f.recent().find(r=>r.job==='comment').receipt,'51')
@@ -108,4 +109,12 @@ test('a comment drafted for one logged-in QQ account cannot send from another',a
  await f.mod.tick()
  assert.equal(f.models(),1)
  assert.deepEqual(f.writes.map(r=>r.action),['like_qzone'])
+})
+
+test('a dynamic feed handle is never passed off as a writable post ID',async t=>{
+ const f=setup(t,{tid:null})
+ await f.mod.tick()
+ assert.deepEqual(f.reads,['get_qzone_feeds'])
+ assert.deepEqual(f.writes,[])
+ assert.equal(f.models(),0)
 })

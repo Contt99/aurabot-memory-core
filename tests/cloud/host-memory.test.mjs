@@ -52,10 +52,10 @@ if(!source) {
    const action=new URL(url).pathname.slice(1),input=JSON.parse(options.body),sec=Math.floor(Date.now()/1000)
    const respond=data=>new Response(JSON.stringify({status:'ok',retcode:0,data}))
    if(action==='get_qzone_msg_list')return respond({msglist:[{tid:'own-post-1',comment_num:1,content:'我发了纸风车。',time:sec}]})
-   if(action==='get_qzone_feeds')return respond({feeds:[{appid:311,key:'friend-post-1',nickname:'朋友',uin:12345,html:'对方做的纸风车',time:sec}]})
+   if(action==='get_qzone_feeds')return respond({feeds:[{appid:311,key:'feed-key-1',tid:'friend-post-1',nickname:'朋友',uin:12345,html:'对方做的纸风车',time:sec}]})
    if(action==='get_qzone_msg_detail')return respond({tid:input.tid,content:'纸风车做法',comments:input.tid==='own-post-1'?
     [{comment_id:'0',uin:12345,name:'朋友',content:'翅膀真好看',time:sec-3,
-     replies:[{comment_id:'5',uin:10002,name:'机器人',content:'谢谢！',time:sec-2},{comment_id:'9',uin:34567,name:'另一位朋友',content:'风轮也好看',time:sec-1}]}]:[]})
+     replies:[{comment_id:'5',uin:10002,name:'机器人',content:'谢谢！',time:sec-2},{comment_id:'0',uin:34567,name:'另一位朋友',content:'风轮也好看',time:sec-1}]}]:[]})
    const writing=h.routes.get('/candidates')({headers:{host:'localhost'}}).items.find(r=>r.status==='sending')
    assert.ok(writing?.sourceIds.length)
    platform.push({action,input})
@@ -79,7 +79,9 @@ if(!source) {
   assert.equal(rows.find(x=>x.job==='comment').status,refuse?'not-sent':'sent')
   assert.equal(rows.find(x=>x.job==='like').status,'sent')
   assert.equal(rows.find(x=>x.job==='reply').receipt,'102')
+  assert.equal(h.core.candidateStatus({module:'qzone-social',job:'reply',key:'r-child-1-0-0',target:'qzone-post:10002:10002:own-post-1'}),'sent')
   assert.deepEqual(platform[0].input,{tid:'own-post-1',content:'回复 另一位朋友：这个纸风车挺好看。'})
+  assert.deepEqual(platform.slice(1).map(x=>x.input.tid),['friend-post-1','friend-post-1'])
   assert.equal(mod.state().count,refuse?1:2)
   assert.equal(mod.state().reserved,refuse?1:2)
   assert.equal(h.core.proactiveState().count,0)

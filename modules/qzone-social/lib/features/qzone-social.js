@@ -131,7 +131,8 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
           `你要回的是这一串：\n${thread}\n\n${last.name} 刚刚说了新的话，结合说说内容和上面的评论，用你的口气接着回 TA 一句。`, allowLegacy)
         if (!text) continue
         if (!(await sendComment(m.tid, `回复 ${last.name}：${text}`, undefined, snapshot,managed,
-          {job:'reply',sourceId:experienceId,detailSourceId:listId,parentId:String(c.comment_id??''),replyId:String(last.comment_id??'')}))) continue
+          {job:'reply',sourceId:experienceId,detailSourceId:listId,parentId:String(c.comment_id??''),replyId:String(last.comment_id??''),
+           replyLevel:last.id.includes('/')?'child':'parent'}))) continue
         if(!managed)memory?.addEvent?.({ text: `在空间回复了${last.name}的评论：${text}`, about: String(last.uin), aboutName: last.name, tags: ['空间'], importance: 0.35 })
         if(!managed)record(s,{kind:'reply',who:last.name,post:String(m.content).slice(0,30),text})
         done++
@@ -152,6 +153,9 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
     const seen = new Set(s.seen)
     for (const f of pickFeeds(res?.feeds, self())) {
       if (done >= budget || managed&&slotsToday(s)>=getConfig().qzoneSocial.maxPerDay) break
+      const tid = f.tid
+      // The feed handle deduplicates the feed; it does not address a post.
+      if (typeof tid!=='string'||!tid.trim()) continue
       if (seen.has(f.key)) continue
       seen.add(f.key)
       const brief = String(f.html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
@@ -165,7 +169,7 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
       let detailSourceId
       try {
         const {value:d,experienceId:detailId}=await read(managed,'post-read',() => onebot.call('get_qzone_msg_detail',
-          {tid:f.key,target_uin:Number(f.uin),num:10},{timeoutMs:20000}),{tid:f.key,targetUin:String(f.uin)})
+          {tid,target_uin:Number(f.uin),num:10},{timeoutMs:20000}),{tid,targetUin:String(f.uin)})
         content = String(d?.content || '')
         existing = summarizeComments(d?.comments, { selfId: self(), ownerQQ: getConfig().ownerQQ, ownerName: owner(), max: 8 })
         detailSourceId=detailId
@@ -176,9 +180,9 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
       let liked = false
       if (c.like && !getConfig().dryRun) {
         try{
-          if(managed)liked=(await submit({job:'like',postId:f.key,targetUin:String(f.uin),sourceId:experienceId})).ok===true
+          if(managed)liked=(await submit({job:'like',postId:tid,targetUin:String(f.uin),sourceId:experienceId})).ok===true
           else{const result=await perform('like',async()=>{
-            const response=await onebot.call('like_qzone',{tid:f.key,target_uin:Number(f.uin),abstime:Number(f.time)||0},{timeoutMs:20000})
+            const response=await onebot.call('like_qzone',{tid,target_uin:Number(f.uin),abstime:Number(f.time)||0},{timeoutMs:20000})
             return {ok:response===null||response?.ok===true}
           });liked=result?.ok===true}
         }catch(error){log.debug('点赞失败：',error.message)}
@@ -190,7 +194,7 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory, life, a
         if (liked&&!managed) record(s, { kind: 'like', who: f.nickname, post: content.slice(0, 30), text: '' }, false)
         continue
       }
-      if (!(await sendComment(f.key,text,f.uin,snapshot,managed,{job:'comment',sourceId:experienceId,detailSourceId}))) continue
+      if (!(await sendComment(tid,text,f.uin,snapshot,managed,{job:'comment',sourceId:experienceId,detailSourceId}))) continue
       if(!managed)memory?.addEvent?.({ text: `在空间评论了${isOwner ? owner() : f.nickname}的说说「${content.slice(0, 24)}」：${text}`, about: String(f.uin), aboutName: f.nickname, tags: ['空间'] })
       if(!managed)record(s,{kind:'comment',who:f.nickname,post:content.slice(0,30),text})
       done++
