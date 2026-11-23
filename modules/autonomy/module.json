@@ -1,7 +1,7 @@
 {
   "id": "autonomy",
   "name": "自主生活 · 真实探索与私人日记",
-  "version": "0.7.0-life.5",
+  "version": "0.7.0-life.6",
   "description": "真实工具探索、如实记录结果，独立本地私人日记与日期浏览；接入life-core来源和后台门禁。",
   "category": "desktop",
   "tags": [

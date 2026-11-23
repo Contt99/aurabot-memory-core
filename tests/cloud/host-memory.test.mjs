@@ -13,6 +13,7 @@ import imageDefinition from '../../modules/image-familiar/index.mjs'
 import {createRequire} from 'node:module'
 import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
 import {createLifeAdapter as purposeAdapter} from '../../modules/purpose/life.mjs'
+import lifeDefinition from '../../modules/life-core/index.mjs'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -24,6 +25,42 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ test('installed module host discovers a newly installed tool without editing life-core',async t=>{
+  const root=fs.mkdtempSync(path.join(scratch,'module-discovery-'))
+  process.env.AURABOT_DATA_DIR=root
+  const {createModules}=await import(pathToFileURL(path.join(source,'core/modules.js')))
+  const cfg={enabled:true,ownerQQ:'10001',allow:{groups:[],private:[]},ext:{},modules:{}}
+  const hub={chatOfSession:()=>'',sessions:()=>({}),resetChat:()=>false}
+  const core={hub,http:{query:()=>({})}}
+  const logger={child(){return this},info(){},warn(){},debug(){},error(){}}
+  const modules=createModules({ctx:{on:()=>()=>{}},core,getConfig:()=>cfg,setConfig:()=>{},logger,version:'1.2.1',builtins:[lifeDefinition]})
+  core.modules=modules;t.after(()=>modules.dispose())
+  await modules.boot()
+  const life=modules.use('life-core')
+  assert.ok(life)
+  const tool='market-weather--current'
+  assert.equal(life.capabilities().some(c=>c.id===tool),false)
+  const dir=path.join(root,'modules','market-weather')
+  fs.mkdirSync(dir,{recursive:true})
+  fs.writeFileSync(path.join(dir,'module.json'),JSON.stringify({id:'market-weather',version:'1.0.0',api:1}))
+  fs.writeFileSync(path.join(dir,'index.mjs'),`export default {id:'market-weather',version:'1.0.0',setup(){return {
+   lifeCapabilities:()=>[{id:'current',effect:'read',args:{city:'城市'},required:['city'],run:({city})=>({ok:true,message:city+' 阴天'})}],
+   lifeSchedules:()=>[{id:'poll',intervalMs:60000,run:()=>{}}]
+  }}}`)
+  await modules.sync()
+  assert.equal(modules.status().find(m=>m.id==='market-weather')?.running,'user')
+  assert.equal(life.ownsSchedule('market-weather','poll'),true)
+  assert.equal(life.capabilities().find(c=>c.id===tool)?.available,false)
+  cfg.ext['life-core']={autonomyTools:tool}
+  assert.equal(life.capabilities().find(c=>c.id===tool)?.available,true)
+  const result=await life.execute(tool,{city:'苏州'},{chatId:chat.chatId})
+  assert.match(life.experienceDetail(result.experienceId,chat.chatId).item.text,/苏州 阴天/)
+  cfg.modules['market-weather']={enabled:false}
+  await modules.sync()
+  assert.equal(life.ownsSchedule('market-weather','poll'),false)
+  assert.equal((await life.execute(tool,{city:'苏州'})).status,'unavailable')
+ })
 
  test('installed Session replaces only the model surface before observing a frozen request',async t=>{
   const h=harness(t,{rows:[message(1,'ACTUAL_SESSION_SOURCE','out')]})

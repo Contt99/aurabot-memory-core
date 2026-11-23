@@ -17,7 +17,7 @@ export function harness(t,{directory,rows=[],lib}={}) {
   timelineCurrent:(ids,{chatId}={})=>ids.every(id=>rows.some(r=>r.id===id&&(!chatId||r.chatId===chatId))),
   diaryMaterial:()=>[],diaryMaterialCurrent:()=>true
  }
- const api={id:'life-core',lib,dataDir:(...p)=>path.join(dir,...p),config:()=>cfg,settings:()=>definition.defaults,use:id=>modules[id],
+ const api={id:'life-core',lib,dataDir:(...p)=>path.join(dir,...p),config:()=>cfg,settings:()=>({...definition.defaults,...cfg.ext['life-core']}),use:id=>modules[id],
   log:{info(){},warn:(...v)=>warnings.push(v.join(' ')),error:(...v)=>warnings.push(v.join(' '))},
   on:(n,f)=>on(events,n,f),onDispose:f=>offs.push(f),every(){},route:(n,f)=>routes.set(n,f),tool(){},defineTool:x=>x,rule(){},
   dsh:{get:()=>null,on:(n,f)=>on(hooks,n,f)},core:{hub:{chatOfSession,sessions:()=>({}),resetChat:id=>{reset.push(id);return true},turnSenders:()=>[],lastPrivateAt:()=>0},http:{query:r=>r?.query||{},body:async r=>r.body||{}}}}

@@ -7,16 +7,18 @@ import {allowedSource,sourceGroups,publicSafe,safeValue} from './lib/policy.mjs'
 import {installObserver} from './lib/observer.mjs'
 import {readableWebResult} from './lib/web-view.mjs'
 import {assertNarrationSupported} from './lib/narration.mjs'
-import {createRecall} from './lib/recall.mjs'
+import {authorizedChat,createRecall} from './lib/recall.mjs'
 import {createTelemetry} from './lib/telemetry.mjs'
 import {createContinuity} from './lib/continuity.mjs'
+import {registeredTools,declaredArguments} from './lib/capabilities.mjs'
+import {createScheduleDispatcher} from './lib/schedule-dispatch.mjs'
 
-const VERSION='0.2.0-local.5'
+const VERSION='0.2.0-local.6'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
  description:'统一能力、真实执行记录、主动触达门禁和日记来源；独立任务不进入她的经历',
- defaults:{enabled:true},settings:[{key:'enabled',label:'启用行动核心',type:'switch'}],
+ defaults:{enabled:true,autonomyTools:''},settings:[{key:'enabled',label:'启用行动核心',type:'switch'},{key:'autonomyTools',label:'授权自主生活的扩展只读工具',type:'textarea',hint:'每行一个完整工具 ID。仅授权模块明确声明的只读能力，例：weather--current。留空不会影响已有聊天工具。'}],
  setup(api,deps={}) {
   const now=deps.now||Date.now,log=api.log,ledger=createLedger(api.dataDir('life.sqlite'))
   const context=new AsyncLocalStorage(),forgetListeners=new Set();let disposed=false,qqBusy=false
@@ -26,16 +28,19 @@ export default {
   const service=name=>{try{return api.dsh.get?.(name)}catch{return null}}
   const moduleFor=id=>api.use(id)
   const enabled=(id)=>cfg().modules?.[id]?.enabled!==false
+  const dispatcher=createScheduleDispatcher({api,active,enabled,now})
+  api.every(60000,dispatcher.tick,'统一后台调度')
   const readMethod=(id,method)=>enabled(id)&&typeof moduleFor(id)?.[method]==='function'
   function capabilities() {
-   return browseIds.map(id=>{
+   const builtins=browseIds.map(id=>{
     let available
     if(id==='web_search'||id==='web_fetch') available=typeof service('web')?.[id==='web_search'?'search':'fetch']==='function'
     else if(id==='save_note') available=true
-    else if(id.startsWith('bili')) available=cfg().bili?.enabled!==false&&readMethod('bili',id==='bili_browse'?'run':'watch')
+    else if(id.startsWith('bili')) available=cfg().bili?.enabled!==false&&readMethod('bili',id==='bili_browse'?'browseReadOnly':'watchReadOnly')
     else available=cfg().ext?.['tieba-reader']?.enabled!==false&&readMethod('tieba-reader',id.replace('tieba_',''))
     return {id,available:active()&&!!available,...(!available?{reason:'当前服务或模块未启用'}:{})}
    })
+   return [...builtins,...registeredTools(api,enabled).map(({run,...tool})=>({...tool,available:active()&&tool.available}))]
   }
   async function perform(meta,run) {
    const parent=context.getStore()
@@ -93,14 +98,27 @@ export default {
    return true
   }
   async function execute(id,args={},ctx={}) {
-   if(!capabilities().some(c=>c.id===id&&c.available)) return {ok:false,status:'unavailable',message:'能力当前不可用：'+id}
+   if(!active()||ctx.chatId&&!authorizedChat(cfg(),ctx.chatId))return{ok:false,status:'unavailable',message:'当前聊天没有这项执行权限'}
+   const tool=browseIds.includes(id)?null:registeredTools(api,enabled).find(c=>c.id===id)
+   if(!(tool?tool.available:capabilities().some(c=>c.id===id&&c.available))) return {ok:false,status:'unavailable',message:'能力当前不可用：'+id}
+   if(tool)try{args=declaredArguments(tool,args)}catch(error){return{ok:false,status:'failed',message:error.message}}
    if(ctx.signal?.aborted) throw ctx.signal.reason||Error('行动已取消')
    const marker=ctx.callId||randomUUID()
-   const meta={module:'life-core',action:id,callId:marker,chatId:ctx.chatId||'',self:true,public:!ctx.chatId,triggerSource:ctx.source||ctx.module||'module-api',goalId:ctx.goalId,evidenceType:id==='web_search'?'search-summary':id==='web_fetch'?'web-body':id==='save_note'?'note':'platform-read',arguments:args}
+   const home=tool&&/^\d+$/.test(String(cfg().ownerQQ||''))?'private:'+cfg().ownerQQ:''
+   const meta={module:'life-core',action:id,...(tool&&{provider:tool.module}),callId:marker,chatId:ctx.chatId||home,self:true,public:!ctx.chatId&&!tool,triggerSource:ctx.source||ctx.module||'module-api',goalId:ctx.goalId,evidenceType:id==='web_search'?'search-summary':id==='web_fetch'?'web-body':id==='save_note'?'note':tool?'tool-result':'platform-read',arguments:args}
+   const previous=ledger.byKey('life-core:'+marker)
+   if(previous&&(previous.deletedAt||previous.meta.action!==id||(previous.meta.chatId||'')!==meta.chatId))return{ok:false,status:'unavailable',message:'调用身份与当前任务不匹配'}
    let value
    try {
     value=await perform(meta,async()=>{
      const signal=ctx.signal||AbortSignal.timeout(120000)
+     if(tool){
+      // Discovery doesn't grant public reuse. Task results stay in the invoking
+      // chat, or in the autonomous private action scope when no chat supplied.
+      const r=await tool.run(args,{signal})
+      if(signal.aborted||!registeredTools(api,enabled).some(x=>x.id===id&&x.available))return{ok:false,status:'interrupted',message:'本次读取已中断或授权已撤销'}
+      return typeof r?.ok==='boolean'?r:{ok:false,message:'工具未明确返回执行状态'}
+     }
      if(id==='web_search') return service('web').search({query:String(args.query||''),maxResults:8},signal)
      if(id==='web_fetch') {
       const u=new URL(String(args.url||''));if(!['http:','https:'].includes(u.protocol)||u.username||u.password) throw Error('只允许普通网页地址')
@@ -124,8 +142,10 @@ export default {
       fs.writeFileSync(path.join(dir,name),JSON.stringify(safeValue(note)),{mode:0o600})
       return {ok:true,...note,message:'已保存探索笔记：'+note.title}
      }
-     if(id==='bili_browse') return moduleFor('bili').run({force:true})
-     if(id==='bili_watch') return moduleFor('bili').watch(String(args.link||args.url||''))
+     if(id==='bili_browse'||id==='bili_watch'){
+      try{return await (id==='bili_browse'?moduleFor('bili').browseReadOnly({query:String(args.query||''),signal}):moduleFor('bili').watchReadOnly(String(args.link||args.url||''),{signal}))}
+      catch(e){if(signal.aborted)return{ok:false,status:'interrupted',message:'本次读取已中断'};throw e}
+     }
      return moduleFor('tieba-reader')[id.replace('tieba_','')](id==='tieba_search'?String(args.query||''):id==='tieba_read'?String(args.url||''):String(args.bar||''),args.bar)
     })
    }catch(error){return{ok:false,status:'failed',message:error.message}}
@@ -220,9 +240,9 @@ export default {
   })
   api.route('/telemetry',()=>({ok:true,...telemetry.snapshot()}))
   const proactiveState=()=>{const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(now()),s=ledger.kv('proactive',{day,count:0,nextAt:0});return{...s,day,count:s.day===day?s.count:0,shared:true}}
-  api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
+  api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),schedules:dispatcher.inventory(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
-  return {version:VERSION,capabilities,execute,perform,propose,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
+  return {version:VERSION,capabilities,execute,perform,propose,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }
 }

@@ -21,7 +21,7 @@ const FETCH_TIMEOUT_MS = 15000
 export default {
   id: 'rss-reader',
   name: '自主上网',
-  version: '1.0.0-life.2',
+  version: '1.0.0-life.3',
   api: 1,
   description: '定时读 RSS 订阅源，把有意思的条目交给主动发言决策（她自己决定要不要跟主人聊）',
   defaults: {
@@ -196,7 +196,7 @@ export default {
     }
 
     // 定时：每 5 分钟看一次到点没（拉取间隔自己判断，不空转网络）。
-    api.every(5 * 60_000, () => {
+    const rssTick=() => {
       const cfg = cfgOf()
       if (!cfg.enabled || !cfg.feeds.length) return
       const st = store.get()
@@ -205,8 +205,12 @@ export default {
       const jitter = cfg.fetchMinutes * 0.2
       const dueMs = Math.max(15, cfg.fetchMinutes + (Math.random() * 2 - 1) * jitter) * 60_000
       if (at - (Number(st.lastFetchAt) || 0) < dueMs) return
-      runOnce().catch((error) => api.log.warn(`自主上网：定时轮出错：${error?.message}`))
-    }, '自主上网')
+      return runOnce()
+    }
+    const fetchClock={id:'fetch-tick',label:'RSS 到期检查',intervalMs:5 * 60_000,run:rssTick}
+    api.every(fetchClock.intervalMs, () => {
+      if(!api.use('life-core')?.ownsSchedule?.('rss-reader',fetchClock.id))return rssTick()
+    }, '自主上网（旧核心兼容）')
 
     // ---------- 面板 ----------
     api.route('/state', async () => ({ ok: true, ...store.status(), config: cfgOf(), latest }))
@@ -226,6 +230,7 @@ export default {
 
     // ---------- 给引擎/其他模块的控件面 ----------
     return {
+      lifeSchedules:()=>[fetchClock],
       /** 最近一轮挑出来的条目（不含正文，安全）。 */
       latest: () => latest.slice(),
       /** 手动跑一轮（面板 /run 同款）。 */

@@ -140,6 +140,35 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return { info, subtitle, comments, vision, shotIds, digest: digestOf(info, { subtitle, comments, vision }) }
   }
 
+  function readEvidence(x) {
+    return { title:x.info.title, bvid:x.info.bvid, url:link(x.info.bvid),
+      kinds:['video-metadata',...(x.subtitle?['subtitles']:[]),...(x.comments.length?['comments']:[]),...(x.vision?['sampled-frames']:[])],
+      text:x.digest }
+  }
+
+  // The exploration entry cannot reach any interaction branch in runAttempt.
+  async function browseReadOnly({query='',signal}={}) {
+    if(stopped||!getConfig().enabled||!cfg().enabled)return{ok:false,message:'B 站未启用'}
+    const check=()=>{
+      signal?.throwIfAborted()
+      if(stopped||!getConfig().enabled||!cfg().enabled)throw Error('B 站已停用')
+    }
+    check()
+    const term=String(query).trim().slice(0,120)
+    const found=term?await api.search(term):await api.popular({ps:8})
+    check()
+    const candidates=[...new Map(filterVideos(found,{minViews:cfg().minViews,maxAgeDays:cfg().maxAgeDays}).map(v=>[v.bvid,v])).values()].slice(0,2)
+    const results=[],unread=[]
+    for(const v of candidates){
+      check()
+      try{const x=await lookAt(v);check();results.push(readEvidence(x))}
+      catch(error){check();unread.push({bvid:v.bvid,url:link(v.bvid),status:'failed'})}
+    }
+    if(!results.length)return{ok:false,message:candidates.length?'找到了候选，但没有实际读到材料':'没找到符合条件的视频',results,unread}
+    return {ok:true,message:`读取了 ${results.length} 个视频的可用资料：`+results.map(x=>x.title).join('、'),
+      text:results.map(x=>x.url+'\n'+x.text).join('\n\n'),results,unread}
+  }
+
   /** 挑一张存下来的截图发到指定会话（主人让她发 / 她刷完顺手发）。 */
   async function sendShot({ chatId, query = '' } = {}) {
     const g = getConfig()
@@ -372,8 +401,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     }
   }
 
-  /** 她看一个视频（你发的链接 / BV 号），返回给她看的内容。 */
-  async function watch(text) {
+  async function readVideo(text,{signal}={}) {
+    signal?.throwIfAborted()
     let id = findVideoId(text)
     if (!id) return { ok: false, message: '没认出视频链接或 BV 号' }
     if (id.short) {
@@ -381,9 +410,23 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       id = findVideoId(real)
       if (!id || id.short) return { ok: false, message: '短链打不开' }
     }
+    signal?.throwIfAborted()
     const x = await lookAt(id)
-    memory?.addEvent?.({ kind: 'seen', meta: { title: x.info.title, author: x.info.author, url: link(x.info.bvid), platform: 'bili', id: x.info.bvid }, text: `看了别人发来的 B 站视频《${x.info.title}》`, tags: ['B站'], importance: 0.4 })
-    return { ok: true, message: x.digest, bvid: x.info.bvid, aid: x.info.aid, title: x.info.title }
+    signal?.throwIfAborted()
+    return { ok: true, message: x.digest, ...readEvidence(x), aid: x.info.aid, author:x.info.author }
+  }
+
+  async function watchReadOnly(text,options={}) {
+    if(stopped||!getConfig().enabled||!cfg().enabled)return{ok:false,message:'B 站未启用'}
+    const result=await readVideo(text,options)
+    return stopped||!getConfig().enabled||!cfg().enabled?{ok:false,status:'interrupted',message:'B 站已停用，本次不再使用结果'}:result
+  }
+
+  /** 保留原聊天入口；只有用户发来的链接按这种来源写旧记忆。 */
+  async function watch(text) {
+    const r=await readVideo(text)
+    if(r.ok)memory?.addEvent?.({ kind: 'seen', meta: { title:r.title, author:r.author, url:r.url, platform:'bili', id:r.bvid }, text:`读取了 B 站视频《${r.title}》的资料`, tags:['B站'], importance:0.4 })
+    return r
   }
 
   /** 在某个视频下发评论（主人让她发的）。 */
@@ -440,7 +483,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   }
 
   return {
-    run, checkReplies, watch, comment, setSign, setAvatar, tick, account, sendShot, listShots,
+    run, browseReadOnly, checkReplies, watch, watchReadOnly, comment, setSign, setAvatar, tick, account, sendShot, listShots,
     libraryShots, shotFileOf, deleteShot,
     dispose() { stopped = true },
     state: () => {

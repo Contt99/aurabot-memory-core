@@ -16,7 +16,7 @@ import {  createDanmaku, danmakuPanelRequest  } from './lib/modules/bili/danmaku
 export default {
   id: 'bili',
   name: 'B站',
-  version: '1.1.0-life.3',
+  version: '1.1.0-life.4',
   description: '看别人发的 B 站视频；定时自己刷、评论、回评论；可选发弹幕；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_danmaku / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
   files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/danmaku.js', 'bili/login-pause.js'],
@@ -41,7 +41,10 @@ export default {
       ask: options => api.ask(options), personaText: () => api.core.personas?.current?.() || '',
       afterBrowse: danmaku.afterBrowse,
     })
-    api.every(60_000, () => bili.tick(), '刷B站')
+    const browseClock={id:'bili-tick',label:'B 站到期检查',intervalMs:60_000,run:bili.tick}
+    api.every(browseClock.intervalMs, () => {
+      if (!api.use('life-core')?.ownsSchedule?.('bili',browseClock.id)) return browseClock.run()
+    }, '刷B站（旧核心兼容）')
 
     // 看视频谁发的链接都能看，评论要主人开口
     api.tool(({ chat, sessionId }) => {
@@ -170,7 +173,7 @@ export default {
       return api.core.http.send(res, 200, readFileSync(p), 'image/jpeg')
     })
     api.route('/bili/shot/delete', async (req) => bili.deleteShot(String((await api.core.http.body(req)).file || '')))
-    return bili
+    return {...bili,lifeSchedules:()=>[browseClock]}
   },
 }
 

@@ -18,8 +18,9 @@ export async function runToolLoop({ core, decide, initial, context = {}, assertA
   try {
     for (let i = 0; i < 5; i++) {
       assertActive();
-      const available = (await bounded(() => core.capabilities())).filter(x => x.available).map(x => x.id);
-      if (!next) next = await bounded(() => decide({ available, observations, signal: controller.signal, remainingMs: deadline - Date.now() }));
+      const tools = (await bounded(() => core.capabilities())).filter(x => x.available);
+      const available = tools.map(x => x.id);
+      if (!next) next = await bounded(() => decide({ available, tools, observations, signal: controller.signal, remainingMs: deadline - Date.now() }));
       assertActive();
       if (!next || ['finish', 'rest', 'think', 'idle'].includes(next.action)) break;
       const id = String(next.tool || next.action || '');
