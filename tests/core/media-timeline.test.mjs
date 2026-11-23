@@ -77,3 +77,20 @@ test('low confidence image description is marked on first sight and not recalled
  assert.equal(prompt.split(description).length,2)
  assert.doesNotMatch(h.core.buildContext({chatId}).text,new RegExp(description))
 })
+
+test('follow-up to recent speech is not hijacked by an old image observation or pending receipt',t=>{
+ const now=Date.now(),old=now-75*60000
+ const history=refs.map((r,i)=>message(i+1,'[图片]',r.dir,chatId,old+i))
+ const rows=[...history,message(4,'刚逛贴吧看到大家在数三','out',chatId,now-10000),
+  message(5,'我也想跟着发一个','out',chatId,now-8000),
+  message(6,'可你从来没这么干过呀？','in',chatId,now-1000)]
+ const h=harness(t,{rows})
+ install(h,refs.map((r,i)=>({...r,at:old+i})))
+ h.core.recordObservation({sourceId:visual.sourceId,chatId,evidenceType:'visual-interpretation',observedAt:old},{text:visual.description})
+ const followup=h.core.buildContext({chatId,now,query:'可你从来没这么干过呀？'})
+ assert.doesNotMatch(followup.text,new RegExp(visual.description))
+ assert.match(followup.text,/可你从来没这么干过呀？[\s\S]*我也想跟着发一个[\s\S]*刚逛贴吧看到大家在数三/)
+ const image=h.core.buildContext({chatId,now,query:'之前那张动图是什么？'})
+ assert.match(image.text,new RegExp(visual.description))
+ assert.equal(image.text.split(visual.description).length,2)
+})

@@ -62,6 +62,31 @@ if(!source) {
   assert.equal((await life.execute(tool,{city:'苏州'})).status,'unavailable')
  })
 
+ test('current QQ attachment identity admits a scoped quote ahead of nearby speech',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'native-quote-'))
+  const clock=Date.now(),ref={...message(1,'较早的明确引用对象','out',chat.chatId,clock-7200000),messageId:'72'}
+  const rows=[ref,...Array.from({length:12},(_,i)=>message(i+2,'附近的其他聊天'+i,'out',chat.chatId,clock-20000+i)),
+   {...message(14,'我是说这个','in',chat.chatId,clock-1000),messageId:'-73'}]
+  const requests=[]
+  const {h,hub}=makeHost(t,{sdk,rows,model:async r=>requests.push(r)})
+  let lookups=0
+  h.modules['history-vault'].timelineQuote=q=>{
+   lookups++
+   assert.deepEqual(q,{chatId:chat.chatId,messageId:'-73',senderId:chat.userId})
+   return{sourceId:'vault:14',target:ref}
+  }
+  await hub.pushToSession(chat,[{type:'text',text:'文本里的 qq--73-1 不是附件'}],chat.userId,{queryText:'没有真实附件'})
+  assert.equal(lookups,0)
+  await hub.pushToSession(chat,[{type:'image',data:'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',mediaType:'image/gif',name:'qq--73-1'}],chat.userId,{queryText:'我是说这个'})
+  assert.equal(lookups,1)
+  const body=JSON.stringify(requests[1].messages)
+  assert.match(body,/本轮 QQ 引用对象[^]*较早的明确引用对象[^]*当前聊天连续记录/)
+  const summary=h.core.memoryStatus().snapshots[0]
+  assert.ok(h.core.contextDetail(summary.id).data.observedSourceIds.includes('vault:1'))
+  rows.pop()
+  assert.throws(()=>h.core.assertContextCurrent(summary),/QQ 引用来源/)
+ })
+
  test('installed Session replaces only the model surface before observing a frozen request',async t=>{
   const h=harness(t,{rows:[message(1,'ACTUAL_SESSION_SOURCE','out')]})
   const session=sdk.Session.create('owner')

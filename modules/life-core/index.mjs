@@ -13,7 +13,7 @@ import {createContinuity} from './lib/continuity.mjs'
 import {registeredTools,declaredArguments} from './lib/capabilities.mjs'
 import {createScheduleDispatcher} from './lib/schedule-dispatch.mjs'
 
-const VERSION='0.2.0-local.6'
+const VERSION='0.2.0-local.7'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',

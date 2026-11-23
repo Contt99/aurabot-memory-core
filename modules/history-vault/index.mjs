@@ -192,7 +192,7 @@ export function shouldRecord(row, { recordGroups = true, groupList = '', private
 export default {
   id: 'history-vault',
   name: '跨会话记忆',
-  version: '0.1.7-local.life',
+  version: '0.1.7-local.life.1',
   api: 1,
   description: '授权QQ聊天的完整原文永久留存，摘要分层、有界读取；显式忘记与清空除外',
   panel: 'panel.js',
@@ -400,6 +400,19 @@ export default {
       const count = Math.min(50, Math.max(1, Math.floor(Number(limit) || 12)))
       return db.prepare('SELECT * FROM vault_lines WHERE chatId = ? AND t <= ? ORDER BY t DESC,id DESC LIMIT ?')
         .all(chatId, ceiling, count).reverse().map(timelineRow)
+    }
+
+    /** The caller must supply an actual current inbound QQ identity, never a text match. */
+    function timelineQuote({chatId='',messageId='',senderId=''}={}) {
+      if(!sourceAllowed(chatId)||!(/^-?[1-9]\d{0,19}$/.test(String(messageId)))||!/^[1-9]\d*$/.test(String(senderId)))return null
+      const from=db.prepare("SELECT * FROM vault_lines WHERE chatId=? AND dir='in' AND messageKey=? AND uid=? AND rawJson<>''")
+        .get(chatId,String(messageId),String(senderId))
+      if(!from)return null
+      const source=timelineRow(from),reply=source.replyId
+      if(!(/^-?[1-9]\d{0,19}$/.test(reply)))return null
+      const targets=db.prepare("SELECT * FROM vault_lines WHERE chatId=? AND messageKey=? AND id<>? AND t<=? AND (rawJson<>'' OR derivedJson<>'') LIMIT 2")
+        .all(chatId,reply,from.id,from.t)
+      return{sourceId:source.id,target:targets.length===1?timelineRow(targets[0]):null}
     }
 
     function timelineCurrent(ids, { chatId = '' } = {}) {
@@ -1029,6 +1042,6 @@ export default {
 
     api.onDispose(() => { forgetVersion++; db.close() })
     log.info('跨会话历史库就绪：三层存储 + 分层读取')
-    return { forgetPerson, impressionRecipients, impressionMaterial, impressionMaterialByIds, diaryMaterial, diaryMaterialCurrent, timelinePage, timelineRecent, timelineCurrent }
+    return { forgetPerson, impressionRecipients, impressionMaterial, impressionMaterialByIds, diaryMaterial, diaryMaterialCurrent, timelinePage, timelineRecent, timelineCurrent, timelineQuote }
   },
 }

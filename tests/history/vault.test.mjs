@@ -51,3 +51,15 @@ test('native messages with unknown original time do not acquire a fabricated occ
  const f=await vaultFixture(t);f.hooks.onebot({post_type:'message',message_type:'private',self_id:99999,user_id:10001,message_id:15,message:[{type:'text',data:{text:'原时间未知'}}]});
  assert.equal(f.vault.timelinePage().rows[0].t,0);
 });
+
+test('exact inbound QQ identity resolves a quoted row only within the same chat',async t=>{
+ const f=await vaultFixture(t)
+ f.hooks.sent([{type:'text',data:{text:'这个群的原话'}}],{chatId:'group:20001',messageId:92,at:1000})
+ f.hooks.sent([{type:'text',data:{text:'另一个群的原话'}}],{chatId:'group:20002',messageId:92,at:1000})
+ f.inbound('group:20001','我是指这个',93,2000,[{type:'reply',data:{id:'92'}}])
+ assert.deepEqual(f.vault.timelineQuote({chatId:'group:20001',messageId:'93',senderId:'10002'}).target.text,'这个群的原话')
+ assert.equal(f.vault.timelineQuote({chatId:'group:20001',messageId:'93',senderId:'10004'}),null)
+ assert.equal(f.vault.timelineQuote({chatId:'group:20002',messageId:'93',senderId:'10002'}),null)
+ f.db.prepare('DELETE FROM vault_lines WHERE chatId=? AND messageKey=?').run('group:20001','92')
+ assert.equal(f.vault.timelineQuote({chatId:'group:20001',messageId:'93',senderId:'10002'}).target,null)
+})
