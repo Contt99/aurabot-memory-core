@@ -32,9 +32,9 @@ export async function modelRequest(h,session,msgs) {
  return request
 }
 
-export function makeHost(t,{sdk,rows=[],directory,model,items,send}) {
+export function makeHost(t,{sdk,rows=[],directory,model,items,send,now}) {
  const lib=name=>{assert.equal(name,'security/leak-guard.js');return sdk.capture}
- const h=harness(t,{lib,rows,directory}), dispatched=[], checks=[]
+ const h=harness(t,{lib,rows,directory,now}), dispatched=[], checks=[]
  Object.assign(h.cfg,{ownerLevel:'social',workspaceDir:path.join(process.env.AURABOT_DATA_DIR,'workspace'),
   voice:{enabled:false},stickers:{enabled:false},files:{enabled:false},memory:{enabled:false},chat:{seedHistory:false},model:{}})
  const mapPath=path.join(process.env.AURABOT_DATA_DIR,'sessions.json')

@@ -12,8 +12,9 @@ import {createTelemetry} from './lib/telemetry.mjs'
 import {createContinuity} from './lib/continuity.mjs'
 import {registeredTools,declaredArguments} from './lib/capabilities.mjs'
 import {createScheduleDispatcher} from './lib/schedule-dispatch.mjs'
+import {createCandidateQueue,nativeAck} from './lib/candidate-queue.mjs'
 
-const VERSION='0.2.0-local.7'
+const VERSION='0.2.0-local.8'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -25,11 +26,12 @@ export default {
   api.onDispose(()=>{disposed=true;ledger.close()})
   const cfg=()=>api.config(),active=()=>!disposed&&cfg().enabled!==false&&api.settings().enabled!==false
   const telemetry=createTelemetry(api)
+  const candidates=createCandidateQueue(ledger.database,now)
   const service=name=>{try{return api.dsh.get?.(name)}catch{return null}}
   const moduleFor=id=>api.use(id)
   const enabled=(id)=>cfg().modules?.[id]?.enabled!==false
   const dispatcher=createScheduleDispatcher({api,active,enabled,now})
-  api.every(60000,dispatcher.tick,'统一后台调度')
+  api.every(60000,()=>Promise.all([dispatcher.tick(),dispatchCandidate()]),'统一后台调度')
   const readMethod=(id,method)=>enabled(id)&&typeof moduleFor(id)?.[method]==='function'
   function capabilities() {
    const builtins=browseIds.map(id=>{
@@ -156,7 +158,7 @@ export default {
    const night=moduleFor('night');const mode=night?.snapshot?.()?.mode||night?.service?.state?.mode
    return mode&&mode!=='awake'&&mode!=='waking'
   }
-  async function propose({source,kind,target,run}={}) {
+  async function propose({source,kind,target,run}={},candidate) {
    const defer=message=>{telemetry.record({stage:'gate',source,kind,target,status:'deferred',reason:message});return{ok:false,status:'deferred',message}}
    if(!active()) return defer('总开关或行动核心已关闭')
    if(sleeping()) return defer('正在睡眠，后台行动顺延')
@@ -167,7 +169,7 @@ export default {
    const recipient=target||'private:'+c.ownerQQ,uid=recipient.replace(/^private:/,'')
    if(!/^private:\d+$/.test(recipient)||uid!==String(c.ownerQQ)&&(!(s.allow||[]).map(String).includes(uid)||!(c.allow?.private||[]).map(String).includes(uid))) return defer('主动触达目标不在授权名单')
    if(api.core.mutes?.muted?.(recipient)) return defer('目标私聊已静音')
-   if(context.getStore()?.proactiveTarget===recipient)return typeof run==='function'?run():defer('没有执行器')
+   if(!candidate&&context.getStore()?.proactiveTarget===recipient)return typeof run==='function'?run():defer('没有执行器')
    if(qqBusy) return defer('另一条主动触达正在处理')
    const hub=api.core.hub,last=uid===String(c.ownerQQ)?Math.max(Number(hub.lastOwnerChatAt)||0,Number(hub.lastBotToOwner?.at)||0,Number(hub.lastPrivateAt?.(uid))||0):Number(hub.lastPrivateAt?.(uid))||0
    if(t-last<Number(s.idleMinutes??40)*60000) return defer('主人最近仍在聊天')
@@ -175,10 +177,86 @@ export default {
    const st=ledger.kv('proactive',{day,count:0,nextAt:0});if(st.day!==day){st.day=day;st.count=0}
    if(st.count>=Number(s.maxPerDay??10)||t<Number(st.nextAt||0)) return defer('共享主动额度或间隔尚未满足')
    const min=Math.max(1,Number(s.minIntervalMinutes)||60),max=Math.max(min,Number(s.maxIntervalMinutes)||180)
-   st.count++;st.nextAt=t+(min+(deps.random||Math.random)()*(max-min))*60000;ledger.setKv('proactive',st)
+   st.count++;st.nextAt=t+(min+(deps.random||Math.random)()*(max-min))*60000
+   if(candidate){
+    ledger.database.exec('BEGIN IMMEDIATE')
+    try{
+     if(!candidates.claim(candidate.id)){ledger.database.exec('ROLLBACK');return defer('候选已处理或过期')}
+     ledger.setKv('proactive',st);ledger.database.exec('COMMIT')
+    }catch(e){ledger.database.exec('ROLLBACK');throw e}
+   }else ledger.setKv('proactive',st)
    telemetry.record({stage:'attempt',source,kind,target:recipient,status:'accepted',count:st.count,nextAt:st.nextAt})
    qqBusy=true
-   try{const r=await perform({module:source||'proactive',action:'proactive-qq',chatId:recipient,self:true,public:false,proactiveTarget:recipient,evidenceType:'outbound-attempt'},run);telemetry.record({stage:'execution',source,kind,target:recipient,status:r?.outcome||r?.status||outcomeStatus(r)});return r}finally{qqBusy=false}
+   try{const r=await perform({module:source||'proactive',action:'proactive-qq',chatId:recipient,self:true,public:false,proactiveTarget:recipient,evidenceType:'outbound-attempt',...(candidate&&{callId:'candidate:'+candidate.id,candidateId:candidate.id,sourceIds:candidate.sourceIds})},run);telemetry.record({stage:'execution',source,kind,target:recipient,status:r?.outcome||r?.status||outcomeStatus(r),...(candidate&&{candidateId:candidate.id})});return r}finally{qqBusy=false}
+  }
+  const candidateJob=(module,id)=>{
+   if(!enabled(module))return null
+   let jobs
+   try{jobs=moduleFor(module)?.lifeJobs?.()}catch{return null}
+   const found=Array.isArray(jobs)?jobs.filter(j=>j?.id===id&&j.kind==='qq'&&typeof j.canRun==='function'&&typeof j.draft==='function'):[]
+   return found.length===1?found[0]:null
+  }
+  const candidatePermission=(job,row)=>{try{return job?.canRun(row)}catch{return false}}
+  const evidenceCurrent=c=>c.sourceIds.length>0&&experiencesCurrent(c.sourceIds,c.target,'chat')&&c.sourceIds.every(id=>ledger.get(id)?.status==='succeeded')
+  function queueCandidate({module,job,key,target,sourceIds,expiresAt}={}){
+   if(!active()||typeof target!=='string'||!/^private:\d+$/.test(target)||!authorizedChat(cfg(),target)||typeof module!=='string'||!(/^[a-z][a-z0-9-]{1,39}$/.test(module))||
+     typeof job!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(job)||typeof key!=='string'||!/^[A-Za-z0-9_-]{1,180}$/.test(key)||
+     !Array.isArray(sourceIds)||sourceIds.length>8||sourceIds.some(id=>typeof id!=='string')||!Number.isSafeInteger(expiresAt)||expiresAt<=now()||expiresAt>now()+86400000||
+     !candidateJob(module,job)||!evidenceCurrent({sourceIds,target}))return{ok:false,status:'unavailable',message:'候选任务或证据尚未授权'}
+   const row=candidates.submit({module,job,key,target,sourceIds,expiresAt})
+   return{ok:true,id:row.id,status:row.status}
+  }
+  async function performEvidence(meta,run){
+   if(!active()||context.getStore())return{value:await run(),experienceId:null}
+   const callId=randomUUID(),value=await perform({...meta,callId},run)
+   const row=ledger.byKey(meta.module+':'+callId)
+   return{value,experienceId:row?.status==='succeeded'&&!row.deletedAt?row.id:null}
+  }
+  let queueBusy=false
+  async function dispatchCandidate(){
+   if(queueBusy||!active())return
+   queueBusy=true
+   try{
+    const ready=candidates.ready()
+    if(!continuity.contextManaged('proactive'))return
+    for(const row of ready){
+     const job=candidateJob(row.module,row.job)
+     const permission=evidenceCurrent(row)&&candidatePermission(job,row)
+     if(permission==='defer')continue
+     if(permission!==true){candidates.cancel(row.id,'source-or-permission');continue}
+     const result=await propose({source:row.module,kind:'qq',target:row.target,run:async()=>{
+      const settle=(status,reason)=>{if(!disposed)candidates.finish(row.id,status,reason);return{ok:false,status}}
+      let draft,snapshot
+      const lastPrivate=()=>Number(api.core.hub.lastPrivateAt?.(row.target.slice(8)))||0
+      const lastAt=lastPrivate()
+      const allowed=(status='running')=>continuity.contextManaged('proactive')&&!cfg().dryRun&&!sleeping()&&lastPrivate()<=lastAt&&candidates.get(row.id)?.status===status&&row.expiresAt>now()&&evidenceCurrent(row)&&candidatePermission(candidateJob(row.module,row.job),row)===true
+      try{
+       if(!allowed())return settle('cancelled','source-or-permission')
+       const inputs=row.sourceIds.map(id=>ledger.get(id).result)
+       snapshot=continuity.buildContext({chatId:row.target,purpose:'proactive',query:inputs.map(r=>r?.title||'').join(' ').slice(0,300),consumer:row.module})
+       draft=await continuity.runWithContext(snapshot,()=>job.draft(row,inputs,snapshot))
+       if(!allowed())return settle('cancelled','source-or-permission')
+       if(draft?.skip===true)return settle('skipped','no-interest')
+       if(typeof draft?.text!=='string'||!draft.text.trim()||draft.text.length>1400||!continuity.validateDraft(draft.text,snapshot).ok)return settle('not-sent','draft-rejected')
+      }catch{return settle('not-sent','draft-failed')}
+      if(!candidates.sending(row.id))return settle('cancelled','expired')
+      let ack,withdrawn=false
+      const isCurrent=()=>{
+       try{if(allowed('sending')&&continuity.validateDraft(draft.text,snapshot).ok)return true}catch{}
+       withdrawn=true;return false
+      }
+      try{ack=await continuity.runWithContext(snapshot,()=>api.core.hub.sendText(row.target,draft.text,undefined,undefined,undefined,{isCurrent}))}
+      catch{return settle('unknown','missing-receipt')}
+      if(withdrawn)return settle('not-sent','source-or-permission')
+      if(disposed||!nativeAck(ack?.message_id)||!candidates.ack(row.id,row.target,ack.message_id))return settle('unknown','missing-receipt')
+      try{if(evidenceCurrent(row))await candidateJob(row.module,row.job)?.confirmed?.(row,draft,String(ack.message_id))}catch{log.warn?.('候选回执已记账；原模块面板摘要未更新')}
+      return{ok:true,status:'sent',messageId:String(ack.message_id),candidateId:row.id}
+     }},row)
+     // One actual model/send attempt per dispatch. A shared gate deferral doesn't
+     // discard the candidate or run a second module to evade the same gate.
+     return result
+    }
+   }finally{queueBusy=false}
   }
   function forgetPerson(qq,query,opts={}) {
    const rows=ledger.all(),ids=new Set(opts.sourceIds||[]),text=String(query||'').trim(),who=String(qq||'')
@@ -197,6 +275,7 @@ export default {
     for(const scope of scopes){revisions[scope]=(Number(revisions[scope])||0)+1;cutoff[scope]=now()}
     ledger.setKv('image-forget-scopes',revisions);ledger.setKv('image-forget-at',cutoff)
    }
+   candidates.forget(ids)
    ledger.invalidate([...ids]);const errors=[]
    try{continuity?.invalidate({sourceIds:[...ids],chatId:opts.chatId||opts.commandChatId,qq:who,query:opts.exactSources?'':text})}catch(e){errors.push(e.message)}
    const notes=api.dataDir('notes')
@@ -213,13 +292,18 @@ export default {
   }
   api.on('sent',(segments,info)=>{
    if(!/^(private|group):\d+$/.test(info?.chatId||'')||!info?.messageId||String(info.messageId).startsWith('sim-'))return
+   const parent=context.getStore()
+   if(parent?.candidateId&&!nativeAck(info.messageId))return
    telemetry.record({stage:'sent',source:'onebot',target:info.chatId,status:'confirmed',messageId:String(info.messageId)})
-   recordOutcome({module:'onebot',action:'send',callId:String(info.chatId)+':'+String(info.messageId),chatId:info.chatId,sourceScopes:[info.chatId],sourceIds:[ackSource(info.chatId,String(info.messageId))],self:true,public:false,evidenceType:'qq-ack'},
+   const sourceIds=[ackSource(info.chatId,String(info.messageId)),...(parent?.candidateId&&parent.chatId===info.chatId?parent.sourceIds||[]:[])]
+   const record=()=>recordOutcome({module:'onebot',action:'send',callId:String(info.chatId)+':'+String(info.messageId),chatId:info.chatId,sourceScopes:[info.chatId],sourceIds,self:true,public:false,evidenceType:'qq-ack'},
     {ok:true,text:segments.map(s=>s.type==='text'?s.data?.text||'':'['+s.type+']').join(''),messageId:String(info.messageId),segments})
+   if(parent?.candidateId)context.exit(record);else record()
   })
   const onForget=fn=>{forgetListeners.add(fn);return()=>forgetListeners.delete(fn)}
   const {recall,experienceDetail,experiencesCurrent}=createRecall({api,ledger,cfg,active,telemetry,current:actionCurrent,inject:false})
-  const continuity=createContinuity({api,ledger,cfg,active,recall,experiencesCurrent,diarySources,assertSourcesCurrent,telemetry,now})
+  const continuity=createContinuity({api,ledger,cfg,active,recall,experiencesCurrent,diarySources,assertSourcesCurrent,telemetry,now,
+   candidateSources: chatId=>{const m=context.getStore();return m?.candidateId&&m.chatId===chatId?m.sourceIds||[]:[]}})
   const managementGuard=req=>{
    try {
     const host=String(req?.headers?.host||''),hostname=new URL('http://'+host).hostname
@@ -233,6 +317,7 @@ export default {
   api.route('/memory/timeline',req=>managementGuard(req)||({ok:true,items:continuity.timeline({chatId:api.core.http.query(req).chatId||'',limit:100})}))
   api.route('/memory/context',req=>managementGuard(req)||({ok:true,snapshot:continuity.contextDetail(api.core.http.query(req).id)}))
   api.route('/memory/event',req=>managementGuard(req)||continuity.eventDetail(api.core.http.query(req).id))
+  api.route('/candidates',req=>managementGuard(req)||({ok:true,items:candidates.recent().map(({jobKey,...c})=>c)}))
   api.route('/memory/correct',async req=>{
    if(req.method!=='POST')return{ok:false,message:'POST required'}
    const guard=managementGuard(req);if(guard)return guard
@@ -243,6 +328,6 @@ export default {
   api.route('/state',()=>({ok:true,version:VERSION,capabilities:capabilities(),schedules:dispatcher.inventory(),observer:observer.available,proactive:ledger.kv('proactive'),sources:{public:sourceGroups(cfg(),'public'),private:sourceGroups(cfg(),'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}))
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))
   api.route('/notes',()=>({ok:true,items:fs.existsSync(api.dataDir('notes'))?fs.readdirSync(api.dataDir('notes')).filter(n=>n.endsWith('.json')).map(n=>JSON.parse(fs.readFileSync(api.dataDir('notes',n),'utf8'))):[]}))
-  return {version:VERSION,capabilities,execute,perform,propose,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
+  return {version:VERSION,capabilities,execute,perform,performEvidence,propose:request=>propose(request),queueCandidate,candidateSentCount:candidates.count,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }
 }

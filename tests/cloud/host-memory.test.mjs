@@ -14,6 +14,7 @@ import {createRequire} from 'node:module'
 import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
 import {createLifeAdapter as purposeAdapter} from '../../modules/purpose/life.mjs'
 import lifeDefinition from '../../modules/life-core/index.mjs'
+import tiebaDefinition from '../../modules/tieba-reader/index.mjs'
 
 const source=process.env.AURABOT_HOST_SRC
 if(!source) {
@@ -25,6 +26,43 @@ if(!source) {
  test.after(()=>fs.rmSync(scratch,{recursive:true,force:true}))
  const sdk=await installed()
  const user=text=>({id:randomUUID(),role:'user',source:{kind:'aurabot'},content:[{type:'text',text}]})
+
+ test('installed hub: a scheduled Tieba candidate receives one QQ ACK and the next model request sees the exact share',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'tieba-candidate-'))
+  const requests=[]
+  // The first scheduler check is intentionally one minute after startup.
+  let now=Date.now()
+  const {h,hub,dispatched}=makeHost(t,{sdk,model:async req=>requests.push(req),now:()=>now})
+  const root=h.dir
+  h.modules['life-core']=h.core
+  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0}
+  h.cfg.ext['tieba-reader']={autoBrowse:true,bars:'手工',startHour:0,endHour:0}
+  Object.assign(h.api.core,{modules:{status:()=>[{id:'tieba-reader',running:'user'}]},personas:{current:()=>''},onebot:{state:'connected'},mutes:{muted:()=>false}})
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const llm={
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){
+    requests.push(opt)
+    yield* await h.stream(Object.freeze(opt),[{type:'text-delta',text:'{"share":true,"index":0,"text":"这个折纸方法蛮有意思。"}'},{type:'finish',reason:{kind:'stop'}}])
+   }
+  }
+  h.modules['tieba-reader']=tiebaDefinition.setup({...h.api,id:'tieba-reader',lib:()=>({registerSecretField(){}}),
+   dataDir:(...p)=>path.join(root,'tieba',...p),settings:()=>({...tiebaDefinition.defaults,...h.cfg.ext['tieba-reader']}),
+   ask:o=>askModel({llm},{...o,model:{provider:'fixture',model:'fixture'}})},
+   {now:()=>now,renderPage:async url=>url.includes('/p/')?{title:'纸风车折法',hasOpening:true,contents:['合成的真实楼主文字。']}:
+    {links:[{title:'纸风车折法',url:'https://tieba.baidu.com/p/123456789'}]}})
+  now+=60000;await h.timers.get('统一后台调度')()
+  assert.equal(dispatched.length,0)
+  now+=60000;await h.timers.get('统一后台调度')()
+  assert.equal(dispatched.length,1,JSON.stringify({candidate:h.routes.get('/candidates')({headers:{host:'localhost'}}).items,
+   state:h.modules['tieba-reader'].state(),requests:requests.length,warnings:h.warnings}))
+  assert.match(JSON.stringify(requests[0].messages),/合成的真实楼主文字/)
+  const [receipt]=h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  assert.equal(receipt.status,'sent')
+  assert.equal(receipt.receipt,'1')
+  await hub.pushToSession(chat,[{type:'text',text:'你刚才分享的叫什么？'}],chat.userId,{queryText:'你刚才分享的叫什么？'})
+  assert.match(JSON.stringify(requests.at(-1).messages),/刚逛手工吧看到这个：纸风车折法/)
+ })
 
  test('installed module host discovers a newly installed tool without editing life-core',async t=>{
   const root=fs.mkdtempSync(path.join(scratch,'module-discovery-'))

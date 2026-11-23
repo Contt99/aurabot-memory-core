@@ -7,6 +7,7 @@ import {safeValue} from './policy.mjs'
 import {checkDraft,timeMeaning} from './draft-check.mjs'
 import {projectRequest,requestBlocks,visibleSources} from './request-content.mjs'
 import {projectMedia} from './media-timeline.mjs'
+import {nativeAck} from './candidate-queue.mjs'
 
 const purposes=new Set(['chat','proactive','autonomy','private-diary','public-diary','public-share'])
 const unique=a=>[...new Set(a.filter(Boolean))]
@@ -23,7 +24,7 @@ function nativeTurnAnchors(info,content){
  return [...new Set(content.filter(b=>b?.type==='image').map(b=>/^qq-(-?[1-9]\d{0,19})-[1-9]\d*$/.exec(b.name)?.[1]).filter(Boolean))]
   .slice(0,4).map(messageId=>({messageId,senderId}))
 }
-export function createContinuity({api,ledger,cfg,active,recall,experiencesCurrent,diarySources,assertSourcesCurrent,telemetry,now=Date.now}) {
+export function createContinuity({api,ledger,cfg,active,recall,experiencesCurrent,diarySources,assertSourcesCurrent,telemetry,candidateSources=()=>[],now=Date.now}) {
  const store=createMemoryStore(ledger.database),bound=new AsyncLocalStorage()
  // Local rollback/restart may expose an older projection beside surviving forget records.
  const retained=unique(ledger.kv('forget-tombstones',[]).flatMap(r=>r.sourceIds||[])).filter(id=>store.reason(id)!=='forgotten')
@@ -226,7 +227,7 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
    const s=load(value);assertContextCurrent(s)
    if(s.purpose==='proactive') {
     const incoming=vault()?.timelineRecent?.({chatId:s.chatId,limit:12})?.filter(r=>r.dir==='in')||[]
-    if(incoming.some(r=>r.t>s.createdAt))throw Error('对方已继续聊天，旧主动草稿不再投递')
+    if(incoming.some(r=>Math.max(Number(r.observedAt)||0,Number(r.t)||0)>s.createdAt))throw Error('对方已继续聊天，旧主动草稿不再投递')
    }
    const targetPurpose=['chat','proactive'].includes(s.purpose)?'chat':s.purpose
    const fresh=s.purpose.endsWith('-diary')?[]:ledger.list(100).filter(r=>r.updatedAt>=s.createdAt&&experiencesCurrent([r.id],s.chatId,targetPurpose)).map(r=>({...summarizeAction(r),type:'action'}))
@@ -247,7 +248,11 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
   if(!authorizedChat(cfg(),info?.chatId)||info.messageId===undefined||info.messageId===null||String(info.messageId).startsWith('sim-'))return
   const text=segments.map(s=>s.type==='text'?s.data?.text||'':`[${s.type}]`).join('')
   const id=canonical({chatId:info.chatId,dir:'out',messageId:String(info.messageId)})
-  const e=store.putEvent({id,nativeKey:id,type:'utterance',chatId:info.chatId,occurredAt:Number(info.at)||now(),status:'confirmed',data:{text:String(safeValue(text)).slice(0,2400),origin:'onebot',messageId:String(info.messageId),sourceIds:[]}})
+  const sourceIds=candidateSources(info.chatId)
+  // A gateway request already in flight cannot be undone. Keep its raw archive,
+  // but don't let the later vault projection recreate a revoked derivative.
+  if(sourceIds.length&&(!nativeAck(info.messageId)||sourceIds.some(sourceId=>store.reason(sourceId)))){store.invalidate([id]);return}
+  const e=store.putEvent({id,nativeKey:id,type:'utterance',chatId:info.chatId,occurredAt:Number(info.at)||now(),status:'confirmed',data:{text:String(safeValue(text)).slice(0,2400),origin:'onebot',messageId:String(info.messageId),sourceIds}})
   if(!e.invalidatedAt&&e.status!=='corrected')promiseOf(id,info.chatId,text,Number(info.at)||now())
  }
  api.on('sent',(segments,info)=>{try{sent(segments,info)}catch(e){warn(e)}})

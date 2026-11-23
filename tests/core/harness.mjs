@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import definition from '../../modules/life-core/index.mjs'
 
-export function harness(t,{directory,rows=[],lib}={}) {
+export function harness(t,{directory,rows=[],lib,now}={}) {
  const dir=directory||fs.mkdtempSync(path.join(os.tmpdir(),'memory-core-'))
- const events=new Map(),hooks=new Map(),routes=new Map(),offs=[],modules={},warnings=[]
+ const events=new Map(),hooks=new Map(),routes=new Map(),timers=new Map(),offs=[],modules={},warnings=[]
  const cfg={enabled:true,dryRun:false,ownerQQ:'10001',botQQ:'10002',allow:{groups:['20001'],private:['10003']},ext:{},modules:{},diary:{sourceGroups:[]}}
  const chatOfSession=id=>({owner:'private:10001',guest:'private:10003',group:'group:20001',purpose:'system:purpose'})[String(id).replace(/^session-/,'')]||''
  const on=(map,n,f)=>{const a=map.get(n)||[];a.push(f);map.set(n,a);return()=>{const i=a.indexOf(f);if(i>=0)a.splice(i,1)}}
@@ -19,9 +19,9 @@ export function harness(t,{directory,rows=[],lib}={}) {
  }
  const api={id:'life-core',lib,dataDir:(...p)=>path.join(dir,...p),config:()=>cfg,settings:()=>({...definition.defaults,...cfg.ext['life-core']}),use:id=>modules[id],
   log:{info(){},warn:(...v)=>warnings.push(v.join(' ')),error:(...v)=>warnings.push(v.join(' '))},
-  on:(n,f)=>on(events,n,f),onDispose:f=>offs.push(f),every(){},route:(n,f)=>routes.set(n,f),tool(){},defineTool:x=>x,rule(){},
+  on:(n,f)=>on(events,n,f),onDispose:f=>offs.push(f),every:(_ms,fn,label)=>timers.set(label,fn),route:(n,f)=>routes.set(n,f),tool(){},defineTool:x=>x,rule(){},
   dsh:{get:()=>null,on:(n,f)=>on(hooks,n,f)},core:{hub:{chatOfSession,sessions:()=>({}),resetChat:id=>{reset.push(id);return true},turnSenders:()=>[],lastPrivateAt:()=>0},http:{query:r=>r?.query||{},body:async r=>r.body||{}}}}
- const core=definition.setup(api)
+ const core=definition.setup(api,{now,random:()=>0})
  const close=()=>{offs.reverse().forEach(f=>f());offs.length=0}
  t.after(()=>{close();if(!directory)fs.rmSync(dir,{recursive:true,force:true})})
  const stream=async(options,chunks=[{type:'finish',reason:{kind:'stop'}}])=>{
@@ -40,6 +40,6 @@ export function harness(t,{directory,rows=[],lib}={}) {
   const decision=await next(0)()
   return{messages:[...nodes.map(n=>stored[n].data),...decision.messages],stored,decision,session}
  }
- return{dir,api,core,cfg,rows,modules,events,hooks,routes,warnings,emit,stream,enter,close,resets:reset}
+ return{dir,api,core,cfg,rows,modules,events,hooks,routes,timers,warnings,emit,stream,enter,close,resets:reset}
 }
 export const message=(n,text,dir='in',chatId='private:10001',t=Date.now()-1000)=>({id:'vault:'+n,sequence:n,t,chatId,dir,who:dir==='out'?'大肥鱼':'发言者',uid:dir==='out'?'10002':chatId.split(':')[1],text,messageId:'native-'+n,atQQs:[]})

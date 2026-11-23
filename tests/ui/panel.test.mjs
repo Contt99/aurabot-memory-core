@@ -7,6 +7,7 @@ const event={id:'event:1',type:'utterance',chatId:'private:123',occurredAt:null,
 const fixtures={
  '/state':{ok:true,capabilities:[{id:'browse',available:true}],observer:true,recent:[{id:'old',at,status:'succeeded',text:'旧经历',evidenceType:'tool',sourceScopes:[]}]},
  '/notes':{ok:true,items:[{id:'note',title:'笔记标题',text:'旧笔记',at,sourceIds:['old']}]},
+ '/candidates':{ok:true,items:[]},
  '/telemetry':{ok:true,since:at,calls:3,withoutUsage:1,input:10,cachedInput:20,cacheWrite:0,fullInput:30,output:5,streamHook:true,recent:[],decisions:[]},
  '/memory/status':{ok:true,events:1,pendingHandoffs:1,managed:true,streamReady:true,lastError:'',budget:6000,corrections:[],snapshots:[{id:'snap:1',chatId:'private:123',purpose:'chat',sessionId:'s1',createdAt:at,status:'prepared',invalidatedAt:0}]},
  '/memory/timeline':{ok:true,items:[event]},
@@ -80,4 +81,18 @@ test('context groups observed excerpts apart from merely prepared sources',async
  assert.match(ui.text(),/实际进入请求.*原说法.*仅准备、未进入请求.*仅准备的另一条内容/)
  await ui.click('收起材料')
  assert.doesNotMatch(ui.text(),/仅准备的另一条内容/)
+})
+
+test('health distinguishes native QQ receipts from uncertain sends, and the list is read only',async()=>{
+ const base={module:'tieba-reader',job:'share',target:'private:123',createdAt:at,updatedAt:at,expiresAt:at+3600000}
+ const ui=mount({'/candidates':{ok:true,items:[
+  {...base,id:'a',status:'sent',receipt:'-42',sourceIds:['evidence-id']},
+  {...base,id:'b',status:'unknown',reason:'missing-receipt',sourceIds:[]}
+ ]}})
+ await ui.settle();assert(!ui.calls.some(c=>c.path==='/candidates'))
+ await ui.click('任务与健康')
+ assert.match(ui.text(),/贴吧分享.*发送已确认.*QQ 回执 -42/)
+ assert.match(ui.text(),/结果未知.*没有 QQ 成功回执/)
+ assert.match(ui.text(),/evidence-id/)
+ assert(ui.calls.filter(c=>c.path==='/candidates').every(c=>!c.options?.method))
 })
