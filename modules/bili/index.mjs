@@ -16,7 +16,7 @@ import {  createDanmaku, danmakuPanelRequest  } from './lib/modules/bili/danmaku
 export default {
   id: 'bili',
   name: 'B站',
-  version: '1.1.0-life.4',
+  version: '1.1.0-life.5',
   description: '看别人发的 B 站视频；定时自己刷、评论、回评论；可选发弹幕；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_danmaku / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
   files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/danmaku.js', 'bili/login-pause.js'],

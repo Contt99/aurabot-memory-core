@@ -47,6 +47,11 @@ export function createLifeAdapter(api) {
       if (!result?.ok) throw Error(result?.message || '统一记忆草稿校验未通过，本轮不发送')
     },
     available: () => Boolean(core()?.propose),
+    platformReady:()=>typeof core()?.runBiliInteraction==='function'&&typeof core()?.performEvidence==='function',
+    platform:spec=>core()?.runBiliInteraction?.(spec)||{ok:false,status:'unavailable'},
+    tally:(job,reserved)=>core()?.countBiliInteractions?.(job,reserved)||0,
+    history:()=>core()?.biliInteractionHistory?.()||[],
+    observe:(action,run,meta)=>core()?.performEvidence?.({module:api.id,action,evidenceType:'provider',public:false,...meta},run),
     perform(action, run, meta = {}) {
       const c = core()
       if (c?.perform) return c.perform({ module: api.id, action, evidenceType: 'provider', public: false, ...meta }, run)

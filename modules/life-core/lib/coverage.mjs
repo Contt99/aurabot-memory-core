@@ -38,8 +38,14 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  const tbFrom=minute(tieba.startHour??9),tbTo=minute(tieba.endHour??23)
  add('tieba.auto','tieba-reader','贴吧定时浏览／分享',{clock:'browse',jobs:['share'],switchOn:tieba.enabled!==false&&tieba.autoBrowse===true,window:tbFrom===tbTo&&tbFrom!==null?'全天':describe(tbFrom,tbTo),note:'浏览依贴吧窗口；分享还要通过 QQ 触达门禁。'})
  const bili=config.bili
- add('bili.auto','bili','B 站定时浏览与平台互动',{clock:'bili-tick',switchOn:bili?!!(bili.enabled&&(bili.autoBrowse||bili.reply)):undefined,window:sameDayWindow,
-  note:'看视频、评论、点赞和分享等结果仍由原模块适配；到期检查不代表写入已纳管。'})
+ add('bili.auto','bili','B 站定时浏览、点赞与评论',{clock:'bili-tick',
+  platform:typeof api.use('bili')?.lifePlatform?.write==='function',
+  switchOn:bili?!!(bili.enabled&&(bili.autoBrowse||bili.reply)):undefined,window:sameDayWindow,
+  note:'评论与回评核对原生编号，点赞核对平台成功。QQ 分享和弹幕另列。'})
+ add('bili.qq','bili','B 站主动 QQ 分享与截图',{switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&(bili.shareToOwner||Number(bili.shotChance)>0)):undefined,
+  observed:true,window:sameDayWindow,note:'仍走原模块出口：经共享主动门禁，但不进入统一持久发送队列。'})
+ add('bili.danmaku','bili','B 站自动弹幕',{switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&bili.danmakuEnabled&&bili.autoDanmaku):undefined,
+  observed:true,window:sameDayWindow,note:'仍用原模块的弹幕额度和回执，不在统一队列内。'})
  add('rss.auto','rss-reader','RSS 定时阅读／转发',{clock:'fetch-tick',switchOn:rss.enabled===true,note:rss.carrier==='pool'?'当前设为只进素材池。':'提议后由原入口决定是否转发，仍未使用持久发送候选。'})
  const spaceSocial=typeof api.use('qzone-social')?.lifePlatform?.canWrite==='function'
  add('qzone-social.auto','qzone-social','空间定时互动',{clock:'interact-tick',platform:spaceSocial,switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,

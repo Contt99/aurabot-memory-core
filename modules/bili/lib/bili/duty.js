@@ -65,6 +65,42 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     log.warn(`今天先不在 B 站发评论了：${why}`)
   }
   const record = (s, item) => { s.history.unshift({ at: Date.now(), ...item }); s.history = s.history.slice(0, 40) }
+  const issued=new WeakMap()
+  const slots=(s,job,reserved=true)=>(s.day===dayKey()?Number(s[job==='reply'?'replies':'comments'])||0:0)+(life?.tally?.(job,reserved)||0)
+  const session=()=>loginSessionKey(cfg().cookie)
+  const ownerId=()=>String(getConfig().ownerQQ||'')
+  async function loginBinding(){
+    const key=session(),owner=ownerId()
+    if(!key)return null
+    const a=await account()
+    const mid=typeof a.mid==='string'?a.mid:Number.isSafeInteger(a.mid)?String(a.mid):''
+    return a.isLogin&&/^[1-9]\d{0,19}$/.test(mid)&&session()===key&&ownerId()===owner?{key,owner,mid}:null
+  }
+  const lifePlatform={
+    canWrite(spec){
+      const scope=issued.get(spec),g=getConfig(),c=g.bili
+      if(!scope||stopped||!g.enabled||!c.enabled||g.dryRun||
+       scope.binding.key!==session()||scope.binding.owner!==ownerId()||scope.binding.mid!==spec.account||!canPost(scope.state))return false
+      if(spec.job==='like')return c.autoBrowse&&c.like
+      if(spec.job==='comment')return c.autoBrowse&&c.comment&&slots(scope.state,'comment')<c.maxCommentsPerDay
+      return spec.job==='reply'&&c.reply&&slots(scope.state,'reply')<c.maxRepliesPerDay
+    },
+    write(spec,command,beforePost){
+      if(!this.canWrite(spec))return null
+      if(spec.job==='like')return api.likeVideo(command.aid,{beforePost})
+      return api.postComment(command.aid,command.text,{root:command.root,parent:command.parent,beforePost})
+    }
+  }
+  async function submit(state,binding,spec){
+    if(!binding||!spec.sourceId)return {ok:false,status:'unavailable'}
+    spec=Object.freeze({...spec,account:binding.mid})
+    issued.set(spec,{binding,state})
+    try{
+      const r=await life.platform(spec)
+      if(r?.code!==undefined)pauseIf(state,{code:r.code})
+      return r
+    }finally{issued.delete(spec)}
+  }
 
   async function account(force = false) {
     const key = loginSessionKey(cfg().cookie)
@@ -111,33 +147,45 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return interests.sort(() => Math.random() - 0.5).slice(0, 3)
   }
 
-  async function lookAt(v) {
-    const rawInfo = await perform('watch', async () => ({ ok: true, ...await api.view({ bvid: v.bvid }) }), { public: true, sourceScopes: [] })
-    const info = {
-      ...rawInfo,
-      title: cleanOutboundText(rawInfo.title, { warn: (message) => log.warn(`B 站标题：${message}`) }).trim(),
-      author: cleanOutboundText(rawInfo.author, { warn: (message) => log.warn(`B 站作者：${message}`) }).trim(),
-    }
-    const [subtitle, comments] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => [])])
-    // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
-    let vision = ''
-    let shotIds = []
-    const c = cfg()
-    if (c.vision) {
-      try {
-        const r = await see({ dsh, api, info, getConfig, log })
-        vision = r.text || ''
-        if (vision) log.debug(`看了《${info.title}》的画面：${vision.slice(0, 40)}…`)
-        // 抽到的帧顺手存进截图库：之后她自己发、或主人让她挑一张发
-        for (const f of r.frames || []) {
-          const it = shots.put(f.buf, { bvid: info.bvid, title: info.title, sec: f.sec, note: vision.slice(0, 120) })
-          if (it) shotIds.push(it.file)
-        }
-      } catch (error) {
-        log.debug(`看画面失败（${info.bvid}）：`, error.message)
+  async function lookAt(v, managed=false) {
+    const read=async()=>{
+      const rawInfo = await api.view({bvid:v.bvid,aid:v.aid})
+      const info = {
+        ...rawInfo,
+        title: cleanOutboundText(rawInfo.title, { warn: (message) => log.warn(`B 站标题：${message}`) }).trim(),
+        author: cleanOutboundText(rawInfo.author, { warn: (message) => log.warn(`B 站作者：${message}`) }).trim(),
       }
+      const [subtitle, comments] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => [])])
+      // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
+      let vision = ''
+      let shotIds = []
+      const c = cfg()
+      if (c.vision) {
+        try {
+          const r = await see({ dsh, api, info, getConfig, log })
+          vision = r.text || ''
+          if (vision) log.debug(`看了《${info.title}》的画面：${vision.slice(0, 40)}…`)
+          // 抽到的帧顺手存进截图库：之后她自己发、或主人让她挑一张发
+          for (const f of r.frames || []) {
+            const it = shots.put(f.buf, { bvid: info.bvid, title: info.title, sec: f.sec, note: vision.slice(0, 120) })
+            if (it) shotIds.push(it.file)
+          }
+        } catch (error) {
+          log.debug(`看画面失败（${info.bvid}）：`, error.message)
+        }
+      }
+      const digest=digestOf(info,{subtitle,comments,vision})
+      return {ok:true,info,subtitle,comments,vision,shotIds,digest,
+        title:info.title,text:`${link(info.bvid)}\n${digest}`,bvid:info.bvid,
+        kinds:['video-metadata',...(subtitle?['subtitles']:[]),...(comments.length?['comments']:[]),...(vision?['sampled-frames']:[])]}
     }
-    return { info, subtitle, comments, vision, shotIds, digest: digestOf(info, { subtitle, comments, vision }) }
+    const meta={public:true,sourceScopes:[],evidenceType:'platform-read'}
+    if(managed){
+      const {value,experienceId}=await life.observe('watch',read,meta)||{}
+      if(!value?.info?.bvid)throw Error('未取得可用的视频资料')
+      return {...value,experienceId}
+    }
+    return perform('watch',read,meta)
   }
 
   function readEvidence(x) {
@@ -238,11 +286,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   async function runAttempt({ force = false, allowLegacy = false } = {}) {
     if (life?.corePresent?.() === false && !allowLegacy) return {ok:false,message:'life-core 不可用，自动浏览已暂停'}
     const c = cfg()
+    const managed = !allowLegacy&&life?.platformReady?.()
     if (busy) return { ok: false, message: '正在刷' }
     if (!c.enabled && !force) return { ok: false, message: 'B 站没打开' }
     busy = true
-    const s = today(load())
+    let s = today(load())
     try {
+      const binding=managed&&(c.comment||c.like)&&!getConfig().dryRun?await loginBinding():null
+      if(binding)s=today(load()) // nav can persist recovery of a stale login pause
       const seen = new Set(s.seen)
       const kws = await chooseKeywords(allowLegacy)
       let pool = []
@@ -260,12 +311,12 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       if (!picked.length) return { ok: false, message: '这次没搜到合适的视频' }
       const looked = []
       for (const v of picked) {
-        try { looked.push(await lookAt(v)) } catch (error) { log.debug(`看 ${v.bvid} 失败：`, error.message) }
+        try { looked.push(await lookAt(v,managed)) } catch (error) { log.debug(`看 ${v.bvid} 失败：`, error.message) }
         seen.add(v.bvid)
       }
       s.seen = [...seen].slice(-500)
       if (!looked.length) return { ok: false, message: '视频都打不开' }
-      const commentLeft = c.comment && canPost(s) ? Math.max(0, c.maxCommentsPerDay - s.comments) : 0
+      const commentLeft = c.comment && canPost(s) ? Math.max(0, c.maxCommentsPerDay - slots(s,'comment')) : 0
       const { output: out, snapshot } = await think(`你在 B 站刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${x.digest}`).join('\n\n')}\n\n` +
         `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "comment":"想在视频下发的评论（像普通观众，一两句、别打广告，不想评就空字符串）", "share":"想私聊分享给${owner()}的话（觉得${owner()}会喜欢才写，不然空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
         `这次最多评论 ${commentLeft} 个。只输出 JSON 数组。`, allowLegacy)
@@ -279,12 +330,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         const v = x.info
         const feeling = cleanOutboundText(d.feeling, { warn: (message) => log.warn(`B 站感受：${message}`) }).trim()
         if (feeling) felt.set(v.bvid, feeling)
-        memory?.addEvent?.({ kind: 'seen', meta: { title: v.title, author: v.author, url: link(v.bvid), platform: 'bili', id: v.bvid }, text: `看了B站公开视频《${v.title}》`, tags: ['B站'], importance: 0.4 })
+        if(allowLegacy)memory?.addEvent?.({ kind: 'seen', meta: { title: v.title, author: v.author, url: link(v.bvid), platform: 'bili', id: v.bvid }, text: `读取了 B 站视频《${v.title}》的资料`, tags: ['B站'], importance: 0.4 })
         const comment = cleanOutboundText(atOwner(d.comment || ''), { warn: (message) => log.warn(`B 站评论：${message}`) }).trim().slice(0, 200)
         if (comment && !isSilence(comment) && commented < commentLeft && canPost(s)) {
           try {
             if (getConfig().dryRun) log.info(`试运行：本来要在 B 站《${v.title}》下评论：${comment}`)
-            else {
+            else if(managed){
+              if((await submit(s,binding,{job:'comment',bvid:v.bvid,sourceId:x.experienceId,text:comment,snapshot}))?.ok)commented++
+            }else if(allowLegacy){
             await perform('comment', () => { life?.checkDraft?.(comment, snapshot); return life ? life.runContext(snapshot, () => api.postComment(v.aid, comment)) : api.postComment(v.aid, comment) }, { public: true, sourceScopes: [] })
             commented++
             s.comments++
@@ -297,7 +350,10 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
             record(s, { kind: 'error', title: v.title, bvid: v.bvid, text: '评论没发出去：' + error.message })
           }
         }
-        if (c.like && !getConfig().dryRun) await perform('like', async () => { await api.likeVideo(v.aid); return { ok: true, aid: v.aid } }, { public: true, sourceScopes: [] }).catch((error) => log.debug('B站点赞失败：', error.message))
+        if (c.like && !getConfig().dryRun){
+          if(managed)await submit(s,binding,{job:'like',bvid:v.bvid,sourceId:x.experienceId})
+          else if(allowLegacy)await perform('like', async () => { await api.likeVideo(v.aid); return { ok: true, aid: v.aid } }, { public: true, sourceScopes: [] }).catch((error) => log.debug('B站点赞失败：', error.message))
+        }
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
         if (share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
           const target = `private:${getConfig().ownerQQ}`
@@ -341,14 +397,13 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         try { await afterBrowse(looked.map(({ info }) => ({ bvid: info.bvid, title: info.title, text: felt.get(info.bvid) || '' })), {allowLegacy}) }
         catch (error) { log.debug('本轮弹幕未完成：', error.message) }
       }
-      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
-      return { ok: true, message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent }
+      log.info(`刷了一轮 B 站：读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
+      return { ok: true, message: `读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent }
     } catch (error) {
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
     } finally {
-      save(s)
-      busy = false
+      try{save(s)}finally{busy=false}
     }
   }
 
@@ -358,13 +413,23 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   async function checkRepliesAttempt(allowLegacy = false) {
     if (life?.corePresent?.() === false && !allowLegacy) return {ok:false,message:'life-core 不可用，自动回复已暂停'}
     const c = cfg()
+    const managed=!allowLegacy&&life?.platformReady?.()
     if (!c.reply) return { ok: false, message: '回复没打开' }
-    const s = today(load())
-    s.lastReplyCheck = Date.now()
+    if (busy) return {ok:false,message:'上一轮 B 站互动还在处理'}
+    let s = today(load())
+    busy=true
     let n = 0
     try {
+      const binding=managed?await loginBinding():null
+      if(binding)s=today(load())
+      s.lastReplyCheck = Date.now()
       const done = new Set(s.repliedFeed)
-      const fresh = (await perform('reply-feed', () => api.replyFeed(), { sourceScopes: ['private:' + getConfig().ownerQQ] })).filter((x) => !done.has(x.id) && Number(x.type || 1) === 1 && x.oid).slice(0, 5)
+      if(!allowLegacy&&!binding)return {ok:false,status:'unavailable',message:'未取得可核对的 B 站登录态'}
+      const scope='private:'+(binding?.owner||ownerId())
+      const {value:feed,experienceId}=managed?await life.observe('reply-feed',()=>api.replyFeed(),{
+        chatId:scope,sourceScopes:[scope],arguments:{account:binding.mid}
+      }):{value:await perform('reply-feed',()=>api.replyFeed(),{sourceScopes:[scope]})}
+      const fresh = feed.filter((x) => !done.has(x.id) && Number(x.type || 1) === 1 && x.oid && x.id).slice(0, 5)
       for (const item of fresh) {
         const x = {
           ...item,
@@ -373,14 +438,17 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         }
         done.add(x.id)
         // 记下来：整理记忆时能知道 B 站上谁跟她聊过什么
-        hub.logChat?.('bili', x.name, `在 B 站《${x.title}》下回复你：${x.text}`, '')
-        if (s.replies >= c.maxRepliesPerDay || !canPost(s)) continue
+        if(allowLegacy)hub.logChat?.('bili', x.name, `在 B 站《${x.title}》下回复你：${x.text}`, '')
+        if (slots(s,'reply') >= c.maxRepliesPerDay || !canPost(s)) continue
         const { output: out, snapshot } = await think(`你在 B 站视频《${x.title}》下发过评论：「${x.myText}」\n${x.name} 回复你：「${x.text}」\n想回就用你的口气回一句（像普通网友聊天，别太长），不想回就只输出 [沉默]。只输出回复正文。`, allowLegacy)
         const reply = cleanOutboundText(out, { warn: (message) => log.warn(`B 站回复：${message}`) }).trim().split(/\n+/)[0]
         if (!reply || isSilence(reply)) continue
         try {
           if (getConfig().dryRun) log.info(`试运行：本来要在 B 站回复 ${x.name}：${reply}`)
-          else {
+          else if(managed){
+            const text=`回复 @${x.name} :${reply}`.slice(0,200)
+            if((await submit(s,binding,{job:'reply',noticeId:x.id,sourceId:experienceId,text,snapshot}))?.ok)n++
+          }else if(allowLegacy){
           await perform('reply', () => { life?.checkDraft?.(reply, snapshot); const send = () => api.postComment(x.oid, `回复 @${x.name} :${reply}`.slice(0, 200), { root: x.root, parent: x.parent }); return life ? life.runContext(snapshot, send) : send() }, { public: false, sourceScopes: ['private:' + getConfig().ownerQQ] })
           s.replies++
           n++
@@ -397,7 +465,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     } catch (error) {
       return { ok: false, message: error.message }
     } finally {
-      save(s)
+      try{save(s)}finally{busy=false}
     }
   }
 
@@ -483,12 +551,13 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   }
 
   return {
-    run, browseReadOnly, checkReplies, watch, watchReadOnly, comment, setSign, setAvatar, tick, account, sendShot, listShots,
+    run, browseReadOnly, checkReplies, watch, watchReadOnly, comment, setSign, setAvatar, tick, account, sendShot, listShots,lifePlatform,
     libraryShots, shotFileOf, deleteShot,
     dispose() { stopped = true },
     state: () => {
       const s = today(load())
-      return { runs: s.runs, comments: s.comments, replies: s.replies, lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s), pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', vision: visionState(cfg()), shots: { count: shots.count() } }
+      const history=[...s.history,...life?.history?.()||[]].sort((a,b)=>b.at-a.at).slice(0,20)
+      return { runs: s.runs, comments: slots(s,'comment',false), replies: slots(s,'reply',false), lastRun: s.lastRun, history, canPost: canPost(s), pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', vision: visionState(cfg()), shots: { count: shots.count() } }
     },
   }
 }

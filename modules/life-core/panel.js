@@ -8,21 +8,27 @@ const purposeLabel=s=>({chat:'普通聊天',proactive:'主动联系',autonomy:'�
 const typeLabel=s=>({message:'收到的消息',utterance:'说过',action:'行动',observation:'观察',reflection:'反思',task:'任务',commitment:'承诺',fact:'精选事实',profile:'人物关系',media:'图片身份'}[s]||s||'类型未知')
 const capabilityLabel=id=>({web_search:'搜索网页',web_fetch:'读取网页',bili_browse:'逛 B 站',bili_watch:'读取 B 站视频',tieba_search:'搜索贴吧',tieba_browse:'浏览贴吧',tieba_read:'阅读贴吧正文',save_note:'保存笔记'}[id]||id)
 const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子正文','video-metadata':'视频资料','web-body':'网页正文','search-summary':'搜索摘要','confirmed-speech':'已发送原话','qq-ack':'QQ 回执',provider:'模块结果',note:'笔记',tool:'工具结果','tool-result':'工具结果'}[id]||id)
-const candidateTarget=c=>c.target?.startsWith('qzone-post:')?'space-social':c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
-const candidateName=c=>({space:'空间日记',journal:'私人日记','space-social':({'like':'空间点赞',comment:'空间评论',reply:'空间回复'}[c.job]||'空间互动')}[candidateTarget(c)]||
+const candidateTarget=c=>c.target?.startsWith('bili-video:')?'bili':c.target?.startsWith('qzone-post:')?'space-social':c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
+const candidateName=c=>({space:'空间日记',journal:'私人日记','space-social':({'like':'空间点赞',comment:'空间评论',reply:'空间回复'}[c.job]||'空间互动'),
+ bili:({like:'B 站点赞',comment:'B 站评论',reply:'B 站回评'}[c.job]||'B 站互动')}[candidateTarget(c)]||
  ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问',
   'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句',
   'night/wake-greeting':'自然醒后问候'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
- if(c.status==='sent')return d==='space'?'发布已确认':d==='space-social'?'平台已确认':'发送已确认'
- if(c.status==='sending')return ({space:'等待说说编号','space-social':'等待空间网关',journal:'保存中',qq:'等待 QQ 回执'})[d]
- if(c.status==='not-sent')return ({space:'未发布','space-social':'未提交成功',journal:'未保存',qq:'未发送'})[d]
+ if(c.status==='sent')return d==='space'?'发布已确认':d==='space-social'||d==='bili'?'平台已确认':'发送已确认'
+ if(c.status==='sending')return ({space:'等待说说编号','space-social':'等待空间网关',bili:'等待 B 站回执',journal:'保存中',qq:'等待 QQ 回执'})[d]
+ if(c.status==='not-sent')return ({space:'未发布','space-social':'未提交成功',bili:'未发送',journal:'未保存',qq:'未发送'})[d]
  return ({queued:'等待调度',expired:'已过期',skipped:'主动跳过'}[c.status]||statusLabel(c.status))
 }
 const candidateDetail=c=>{
  const d=candidateTarget(c),r=c.reason
+ if(d==='bili'){
+  if(c.receipt)return c.job==='like'?'平台确认（点赞没有单独编号）':'B 站评论编号 '+c.receipt
+  if(r==='missing-receipt'||r==='restarted')return '结果待平台确认，不自动重发'
+  if(r==='provider-rejected')return 'B 站明确拒绝'
+ }
  if(d==='space-social'){
   if(c.receipt)return c.job==='like'?'网关确认（点赞没有单独编号）':'评论编号 '+c.receipt
   if(r==='missing-receipt')return '未取得可核对的空间结果，不自动重发'

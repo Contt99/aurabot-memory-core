@@ -77,11 +77,13 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     }
     const timeout = AbortSignal.timeout(timeoutMs)
     const r = await fetchImpl(url, { method, headers, body, signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
-    const j = await r.json().catch(() => ({ code: r.status, message: 'HTTP ' + r.status }))
+    const j = await r.json().catch(() => null)
+    if (!j || r.ok === false) throw new Error('B 站响应无法确认：HTTP '+r.status)
     if (envelope) return j
     if (j.code !== 0) {
       const e = new Error(`B 站返回 ${j.code}${j.message ? '：' + j.message : ''}`)
       e.code = j.code
+      e.biliRejected = Number.isInteger(j.code) && j.code !== 0
       throw e
     }
     return j.data
@@ -205,22 +207,25 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
   }
 
   /** 发评论；root/parent 不传就是一级评论。要登录。 */
-  async function postComment(aid, rawMessage, { root, parent } = {}) {
+  async function postComment(aid, rawMessage, { root, parent, beforePost } = {}) {
     const message = cleanOutboundText(rawMessage, { warn: (message) => log?.warn?.(`B 站评论：${message}`) }).replace(/＠/g, '@')
     if (!message.trim()) return { silent: true, rpid: '', at: [], missed: [] }
     const csrf = parseCookie(getCookie()).bili_jct
     if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
     const { map, missed } = await resolveAts(message)
     const at = Object.keys(map)
+    beforePost?.()
     const d = await req('https://api.bilibili.com/x/v2/reply/add', { method: 'POST', form: { type: 1, oid: aid, message, plat: 1, csrf, ...(root ? { root, parent: parent || root } : {}), ...(at.length ? { at_name_to_mid: JSON.stringify(map) } : {}) } })
-    return { rpid: d.rpid, at, missed }
+    return { rpid: d?.rpid, rpid_str:d?.rpid_str??d?.reply?.rpid_str, at, missed }
   }
 
   /** 点赞视频。要登录。 */
-  async function likeVideo(aid) {
+  async function likeVideo(aid,{beforePost}={}) {
     const csrf = parseCookie(getCookie()).bili_jct
     if (!csrf) throw new Error('没登录 B 站')
+    beforePost?.()
     await req('https://api.bilibili.com/x/web-interface/archive/like', { method: 'POST', form: { aid, like: 1, csrf } })
+    return {accepted:true}
   }
 
   /** 改自己的个性签名（B 站上限 70 字）。要登录。 */
@@ -255,7 +260,7 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
   async function replyFeed() {
     const d = await req('https://api.bilibili.com/x/msgfeed/reply?platform=web&build=0&mobi_app=web')
     return (d.items || []).map((x) => ({
-      id: String(x.id), time: (x.reply_time || 0) * 1000, name: x.user?.nickname, mid: x.user?.mid,
+      id: typeof x.id==='string'?x.id:Number.isSafeInteger(x.id)?String(x.id):'', time: (x.reply_time || 0) * 1000, name: x.user?.nickname, mid: x.user?.mid,
       text: String(x.item?.source_content || '').slice(0, 300), myText: String(x.item?.target_reply_content || x.item?.root_reply_content || '').slice(0, 300),
       oid: x.item?.subject_id, root: x.item?.root_id || x.item?.source_id, parent: x.item?.source_id, title: x.item?.title || '', uri: x.item?.uri || '', type: x.item?.business_id,
     }))

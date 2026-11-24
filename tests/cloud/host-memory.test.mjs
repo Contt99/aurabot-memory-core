@@ -22,6 +22,11 @@ import purposeDefinition from '../../modules/purpose/index.mjs'
 import speakupDefinition from '../../modules/speakup/index.mjs'
 import qzoneSocial from '../../modules/qzone-social/index.mjs'
 import night from '../../modules/night/index.mjs'
+import { createLifeAdapter as biliLife } from '../../modules/bili/life.mjs'
+import { createBili as biliDuty, bindApi as bindBiliDuty } from '../../modules/bili/lib/bili/duty.js'
+import { createBiliApi, bindApi as bindBiliTransport } from '../../modules/bili/lib/bili/api.js'
+import { bindApi as bindBiliShots } from '../../modules/bili/lib/bili/shots.js'
+import { bindApi as bindBiliVision } from '../../modules/bili/lib/bili/vision.js'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -117,6 +122,53 @@ if(!source) {
   assert.equal(h.routes.get('/candidates')({headers:{host:'localhost'}}).items[0].receipt,'1')
   await hub.pushToSession(chat,[{type:'text',text:'好啊，接着聊。'}],chat.userId)
   assert.match(JSON.stringify(turns[0].messages),/纸风车的话题要接着聊吗/)
+ })
+
+ test('installed host: Bili timer preserves string IDs and stays conservative on transport loss',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'bili-platform-'))
+  const {h}=makeHost(t,{sdk})
+  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0}
+  h.cfg.group={interests:[]}
+  h.cfg.bili={enabled:true,autoBrowse:true,comment:true,like:true,reply:false,perRun:1,intervalHours:0,maxRunsPerDay:3,
+   maxCommentsPerDay:2,cookie:'SESSDATA=synthetic;bili_jct=fixture',keywords:['纸风车']}
+  h.modules['life-core']=h.core
+  h.api.core.modules={status:()=>[{id:'bili',running:'user'}]}
+  const libs=Object.fromEntries(await Promise.all(['core/store.js','chat/reply.js','core/llm.js','core/img.js','core/net.js']
+   .map(async p=>[p,await import(pathToFileURL(path.join(source,p)))])))
+  const {askModel}=libs['core/llm.js']
+  const transport=[]
+  const rows=()=>h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  const fixtureVideo={aid:99007,bvid:'BV1234567890',title:'纸风车',author:'示例 UP'}
+  const client=createBiliApi({getCookie:()=>h.cfg.bili.cookie,fetchImpl:async(url,req)=>{
+   const endpoint=new URL(url).pathname
+   if(endpoint==='/x/web-interface/nav')return new Response(JSON.stringify({code:0,data:{isLogin:true,mid:22222}}))
+   assert.equal(req.method,'POST')
+   const form=new URLSearchParams(req.body)
+   assert.equal(form.get('aid')||form.get('oid'),'99007')
+   assert.ok(rows().find(c=>c.status==='sending')?.sourceIds.length)
+   transport.push(endpoint)
+   if(endpoint==='/x/v2/reply/add')return new Response(JSON.stringify({code:0,data:{reply:{rpid_str:'92000000000000001'}}}))
+   assert.equal(endpoint,'/x/web-interface/archive/like')
+   throw Error('synthetic transport lost after submit')
+  }})
+  const upstream={...client,search:async()=>[fixtureVideo],popular:async()=>[],view:async()=>fixtureVideo,
+   subtitle:async()=>'',comments:async()=>[]}
+  const libApi={...h.api,id:'bili',lib:p=>libs[p],ask:o=>askModel({llm:{
+   resolveModelInfo:async()=>({}),
+   async *stream(opt){
+    const text=JSON.stringify(opt.messages).includes('挑 3 个')?'["纸风车"]':'[{"i":1,"comment":"纸风车真好看呀"}]'
+    yield* await h.stream(opt,[{type:'text-delta',text},{type:'finish',reason:{kind:'stop'}}])
+   }
+  }},{...o,model:{provider:'fixture',model:'fixture'}})}
+  for(const bind of [bindBiliDuty,bindBiliTransport,bindBiliShots,bindBiliVision])bind(libApi)
+  const entry=h.modules.bili=biliDuty({getConfig:libApi.config,hub:h.api.core.hub,log:{...h.api.log,debug(){}},
+   life:biliLife(libApi),ask:libApi.ask,api:upstream})
+  await entry.tick()
+  assert.equal(transport.length,2)
+  assert.equal(rows().find(c=>c.job==='comment')?.receipt,'92000000000000001')
+  assert.equal(rows().find(c=>c.job==='like')?.status,'unknown')
+  assert.equal(entry.state().comments,1)
+  assert.equal(h.core.proactiveState().count,0)
  })
 
  for(const revoke of [false,true])test('installed hub: wake greeting '+(revoke?'stops at the last outbound guard after owner changes':'is confirmed exactly once on the native transport'),async t=>{
