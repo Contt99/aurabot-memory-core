@@ -416,6 +416,27 @@ if(!source) {
   assert.equal((await delivery).status,'shown')
  })
 
+ test('the installed DSH pipeline emits a final structured result into only the originating chat',async t=>{
+  const dsh=process.env.DSH_MODULE_ROOT||'/opt/dsh/lib/node_modules/@deepseek-ai/dsh/node_modules'
+  const {ToolExecutionPipeline}=await import(pathToFileURL(path.join(dsh,'@deepseek-ai/dsh-tools/lib/pipeline.js')))
+  const h=harness(t),session=sdk.Session.create('owner')
+  const pipe=new ToolExecutionPipeline({tools:{},logger:{warn:assert.fail},events:{dispatch:(mode,args)=>{
+   assert.equal(mode,'emit');assert.equal(args[1],'tools/result')
+   return h.hooks.get('tools/result')||[]
+  }}})
+  const call={agent:{session},name:'workbuddy_draw_video',callId:'synthetic-workbuddy-artifact'}
+  const final=pipe.finish(call,{isError:false,content:[{type:'text',text:'插件返回了本地视频'}],
+   value:{videos:['file:///C:/fixture/not-a-real.mp4']}})
+  assert.ok(Object.isFrozen(final))
+  const mine=h.core.recall({chatId:chat.chatId,query:'视频'})
+  assert.equal(mine.items.length,1)
+  assert.equal(mine.items[0].evidenceType,'workbuddy-artifact')
+  assert.match(mine.text,/已下载的视频产物/)
+  assert.doesNotMatch(mine.text,/not-a-real\.mp4/)
+  assert.deepEqual(h.core.recall({chatId:'private:10003',query:'视频'}).items,[])
+  assert.deepEqual(h.core.queryExperiences({purpose:'private-diary'}),[])
+ })
+
  test('installed host: scheduled RSS receipt is private and the carrier never implies a QQ post',async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'rss-pool-'))
   let clock=Date.now()

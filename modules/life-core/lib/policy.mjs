@@ -14,6 +14,7 @@ export function allowedSource(row, cfg, purpose, chatId = '') {
   const scopes = [...new Set([...(m.sourceScopes || []), ...(m.chatId ? [m.chatId] : [])])]
   if (scopes.some(s => !/^(group|private):\d+$/.test(s))) return false
   if (purpose === 'chat') return scopes.every(s => s === chatId) && (m.public === true || scopes.length > 0)
+  if (m.chatOnly) return false
   const pub = purpose === 'public-diary', priv = purpose === 'private-diary'
   if (!pub && !priv && purpose !== 'autonomy') return false
   const groups = new Set(sourceGroups(cfg, pub ? 'public' : 'private'))

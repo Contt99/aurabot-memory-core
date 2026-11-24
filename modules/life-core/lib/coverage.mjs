@@ -7,7 +7,7 @@ const covers=(from,to,m)=>from<=to?m>=from&&m<to:m>=from||m<to
 const state=value=>typeof value==='boolean'?(value?'on':'off'):'unknown'
 
 /** Report live interfaces and known exits separately from business switches and receipts. */
-export function actionCoverage({api,config,schedules,candidateJob,observing,coreEnabled}){
+export function actionCoverage({api,config,schedules,candidateJob,observing,finalResults,coreEnabled}){
  const modules=api.core.modules?.status?.()
  if(!Array.isArray(modules))return null
  const running=new Set(modules.filter(m=>m.running).map(m=>m.id))
@@ -88,7 +88,8 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  for(const s of schedules)if(!used.has(s.module+':'+s.id))entries.push({
   id:s.module+':'+s.id,module:s.module,label:s.label,mode:'clock-only',switchState:'unknown',checkMinutes:s.intervalMs/60_000,lastCheckAt:s.checkedAt||null,
   note:'模块声明了到期检查；没有已知的持久回执出口。'})
- entries.push({id:'chat.tools',module:'dsh',label:'聊天工具结果',mode:observing?'observed':'outside',switchState:'unknown',
-  note:'监听所属聊天的工具调用和返回；异步提交不等于任务完成。'})
+ entries.push({id:'chat.tools',module:'dsh',label:'聊天与委派工具结果',mode:observing||finalResults?'observed':'outside',switchState:'unknown',
+  note:finalResults?'接收 DSH 最终回执，含机器人委派子会话；不记录独立操作，也不启用更多工具。仅异步受理不算完成。':
+   observing?'只看到聊天工具消息，不能据此确认 WorkBuddy 产物或最终结果。':'当前没有接入 DSH 工具回执。'})
  return {timezone:tz,coreEnabled,entries,conflicts}
 }

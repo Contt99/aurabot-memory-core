@@ -21,7 +21,7 @@ import {createBiliPlatform} from './lib/bili-platform.mjs'
 import {createBiliDelivery,isBiliQQJob} from './lib/bili-delivery.mjs'
 import {createRssPool} from './lib/rss-pool.mjs'
 
-const VERSION='0.2.0-local.19'
+const VERSION='0.2.0-local.20'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -415,7 +415,7 @@ export default {
   api.route('/state',()=>{
    const schedules=dispatcher.inventory(),config=cfg()
    return {ok:true,version:VERSION,capabilities:capabilities(),schedules,observer:observer.available,
-    coverage:actionCoverage({api,config,schedules,candidateJob,observing:observer.available,coreEnabled:active()}),
+    coverage:actionCoverage({api,config,schedules,candidateJob,observing:observer.available,finalResults:observer.finalResults,coreEnabled:active()}),
     proactive:ledger.kv('proactive'),sources:{public:sourceGroups(config,'public'),private:sourceGroups(config,'private')},recent:queryExperiences({purpose:'private-diary',limit:20})}
   })
   api.route('/experiences',req=>({ok:true,items:queryExperiences({purpose:'private-diary',limit:100,since:Number(api.core.http.query(req).since)||0})}))

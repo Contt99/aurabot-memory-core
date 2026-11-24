@@ -1,4 +1,4 @@
-"""Run the host suite with the installed desktop Session SDK (no npm/downloads)."""
+"""Run the host suite with installed desktop Session and Tools SDKs (no downloads)."""
 import argparse
 import json
 import os
@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 
-def extract_session_packages(archive, modules):
+def extract_sdk_packages(archive, modules):
     # Electron ASAR: header pickle length, header JSON, contiguous file contents.
     with archive.open("rb") as f:
         _, header_length, _, json_length = struct.unpack("<4I", f.read(16))
@@ -29,7 +29,8 @@ def extract_session_packages(archive, modules):
                     raise ValueError(f"Invalid ASAR entry: {name!r}")
                 extract(child, path / name)
 
-        seen, pending = set(), ["@deepseek-ai/dsh-session"]
+        sdk = ("@deepseek-ai/dsh-session", "@deepseek-ai/dsh-tools")
+        seen, pending = set(), list(sdk)
         while pending:
             pkg = pending.pop()
             if pkg in seen:
@@ -42,7 +43,7 @@ def extract_session_packages(archive, modules):
             extract(node, modules / pkg)
             pending.extend(manifest.get("dependencies", {}))
             pending.extend(manifest.get("peerDependencies", {}))
-            if pkg == "@deepseek-ai/dsh-session":
+            if pkg in sdk:
                 print(f"Installed {pkg} {manifest['version']}", flush=True)
 
 
@@ -53,7 +54,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="host-memory-sdk-") as tmp:
         modules = Path(tmp) / "node_modules"
-        extract_session_packages(args.app_asar, modules)
+        extract_sdk_packages(args.app_asar, modules)
         env = dict(os.environ, AURABOT_HOST_SRC=str(args.host_src.resolve()),
                    DSH_MODULE_ROOT=str(modules))
         suite = Path(__file__).with_name("host-memory.test.mjs")
