@@ -52,3 +52,24 @@ test('expiry and forgotten sources terminally revoke a queued candidate',t=>{
  assert.deepEqual(q.get(b.id).sourceIds,[])
  assert.equal(q.claim(b.id),false)
 })
+
+test('short-lived drafts survive queued restart and are scrubbed on forget or uncertain send',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'candidate-draft-')),file=path.join(dir,'candidate.sqlite')
+ let db=new DatabaseSync(file)
+ t.after(()=>{db.close();fs.rmSync(dir,{recursive:true,force:true})})
+ const now=()=>1000
+ let q=createCandidateQueue(db,now)
+ const spec={module:'bili',job:'share',target,key:'a',sourceIds:['view-1'],expiresAt:6000}
+ const a=q.submit(spec,{snapshotId:'prepared',text:'a staged share'})
+ const b=q.submit({...spec,key:'b',sourceIds:['view-2']},{snapshotId:'prepared-2',text:'other share'})
+ assert.doesNotMatch(JSON.stringify(q.recent()),/staged share/)
+ assert(q.claim(b.id)&&q.sending(b.id))
+ db.close();db=new DatabaseSync(file)
+ q=createCandidateQueue(db,now)
+ assert.equal(q.draft(a.id)?.text,'a staged share')
+ assert.equal(q.get(b.id).status,'unknown')
+ assert.equal(q.draft(b.id),null)
+ q.forget(new Set(['view-1']))
+ assert.equal(q.get(a.id).status,'cancelled')
+ assert.equal(q.draft(a.id),null)
+})

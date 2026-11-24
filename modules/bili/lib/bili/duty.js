@@ -2,6 +2,7 @@
 // 定时看别人回她的评论并接着回；你在 QQ 里发链接，她也能点进去看完再聊。看过的、评过的都记成她的经历。
 
 let dataDir, readJson, writeJson
+import {readFileSync,statSync} from 'node:fs'
 import {  createBiliApi, findVideoId, parseCookie  } from './api.js'
 import {  loginSessionKey, recoverLoginPause  } from './login-pause.js'
 import {  lookWithVision, visionState  } from './vision.js'
@@ -66,6 +67,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   }
   const record = (s, item) => { s.history.unshift({ at: Date.now(), ...item }); s.history = s.history.slice(0, 40) }
   const issued=new WeakMap()
+  const deliveryIssued=new WeakSet()
   const slots=(s,job,reserved=true)=>(s.day===dayKey()?Number(s[job==='reply'?'replies':'comments'])||0:0)+(life?.tally?.(job,reserved)||0)
   const session=()=>loginSessionKey(cfg().cookie)
   const ownerId=()=>String(getConfig().ownerQQ||'')
@@ -100,6 +102,29 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       if(r?.code!==undefined)pauseIf(state,{code:r.code})
       return r
     }finally{issued.delete(spec)}
+  }
+  const fileFor=id=>{
+    const it=shots.list('').find(s=>s.file===id)
+    return it&&shots.exists(it)?shotPath(it):''
+  }
+  const lifeDelivery={
+    jobs:['share','shot'],
+    canQueue:spec=>!stopped&&deliveryIssued.has(spec),
+    frameCurrent:file=>!stopped&&!!fileFor(file),
+    readFrame(file){
+      if(stopped)return null
+      try{
+        const p=fileFor(file)
+        return p&&statSync(p).size<=4*1024*1024?readFileSync(p):null
+      }catch{return null}
+    },
+  }
+  function queueQQ(spec){
+    if(!life?.queueQQ||!spec.sourceId)return false
+    const ticket=Object.freeze(spec)
+    deliveryIssued.add(ticket)
+    try{return life.queueQQ(ticket)?.status==='queued'}
+    finally{deliveryIssued.delete(ticket)}
   }
 
   async function account(force = false) {
@@ -286,6 +311,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   async function runAttempt({ force = false, allowLegacy = false } = {}) {
     if (life?.corePresent?.() === false && !allowLegacy) return {ok:false,message:'life-core 不可用，自动浏览已暂停'}
     const c = cfg()
+    const recipient=ownerId()
     const managed = !allowLegacy&&life?.platformReady?.()
     if (busy) return { ok: false, message: '正在刷' }
     if (!c.enabled && !force) return { ok: false, message: 'B 站没打开' }
@@ -323,6 +349,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       const decisions = pickJson(out, [])
       let commented = 0
       let shared = 0
+      let queuedShares=0,queuedShots=0
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
       for (const d of Array.isArray(decisions) ? decisions : []) {
         const x = looked[(Number(d.i) || 0) - 1]
@@ -355,19 +382,23 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
           else if(allowLegacy)await perform('like', async () => { await api.likeVideo(v.aid); return { ok: true, aid: v.aid } }, { public: true, sourceScopes: [] }).catch((error) => log.debug('B站点赞失败：', error.message))
         }
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
-        if (share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
-          const target = `private:${getConfig().ownerQQ}`
-          const sent = await propose('qq', target, () => { life?.checkDraft?.(share, snapshot); return life ? life.runContext(snapshot, () => hub.sendText(target, `${share}\n${link(v.bvid)}`)) : hub.sendText(target, `${share}\n${link(v.bvid)}`) })
-          if (sent?.message_id !== undefined && !String(sent.message_id).startsWith('sim-')) {
-            shared++
-            record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
+        if (share && !isSilence(share) && c.shareToOwner && recipient) {
+          const target = 'private:'+recipient
+          if(!allowLegacy){
+            if(queueQQ({job:'share',target,bvid:v.bvid,sourceId:x.experienceId,text:share,snapshot}))queuedShares++
+          }else{
+            const sent = await propose('qq', target, () => { life?.checkDraft?.(share, snapshot); return life ? life.runContext(snapshot, () => hub.sendText(target, `${share}\n${link(v.bvid)}`)) : hub.sendText(target, `${share}\n${link(v.bvid)}`) })
+            if (sent?.message_id !== undefined && !String(sent.message_id).startsWith('sim-')) {
+              shared++
+              record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
+            }
           }
         }
         record(s, { kind: 'watch', title: v.title, bvid: v.bvid, text: feeling })
       }
       // 刷完按概率顺手甩一张截图给主人：默认概率和发一张表情包一样，0 = 从不
       let shotSent = 0
-      const shotTo = getConfig().ownerQQ ? `private:${getConfig().ownerQQ}` : ''
+      const shotTo = recipient ? 'private:'+recipient : ''
       if (shotTo && c.enabled && getConfig().enabled && !getConfig().dryRun && Number(c.shotChance) > 0) {
         const pool = looked.filter((x) => x.shotIds && x.shotIds.length)
         if (pool.length && Math.random() < Number(c.shotChance)) {
@@ -375,16 +406,20 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
           const file = x.shotIds[Math.floor(Math.random() * x.shotIds.length)]
           try {
             const line = felt.get(x.info.bvid) || ''
-            const r = await propose('qq', shotTo, async () => {
-              life?.checkDraft?.(line, snapshot)
-              const ack = await (life ? life.runContext(snapshot, () => { life.checkDraft(line, snapshot); return hub.sendImage(shotTo, shotPath({ file })) }) : hub.sendImage(shotTo, shotPath({ file })))
-              if (ack?.message_id !== undefined && !String(ack.message_id).startsWith('sim-') && line) { life?.checkDraft?.(line, snapshot); await (life ? life.runContext(snapshot, () => { life.checkDraft(line, snapshot); return hub.sendText(shotTo, line) }) : hub.sendText(shotTo, line)) }
-              return ack
-            })
-            if (r?.message_id !== undefined && !String(r.message_id).startsWith('sim-')) {
-              shotSent = 1
-              record(s, { kind: 'shot', title: x.info.title, bvid: x.info.bvid, text: line })
-              log.info(`刷完顺手发了张截图《${x.info.title}》`)
+            if(!allowLegacy){
+              if(queueQQ({job:'shot',target:shotTo,bvid:x.info.bvid,file,sourceId:x.experienceId,text:line,snapshot}))queuedShots++
+            }else{
+              const r = await propose('qq', shotTo, async () => {
+                life?.checkDraft?.(line, snapshot)
+                const ack = await (life ? life.runContext(snapshot, () => { life.checkDraft(line, snapshot); return hub.sendImage(shotTo, shotPath({ file })) }) : hub.sendImage(shotTo, shotPath({ file })))
+                if (ack?.message_id !== undefined && !String(ack.message_id).startsWith('sim-') && line) { life?.checkDraft?.(line, snapshot); await (life ? life.runContext(snapshot, () => { life.checkDraft(line, snapshot); return hub.sendText(shotTo, line) }) : hub.sendText(shotTo, line)) }
+                return ack
+              })
+              if (r?.message_id !== undefined && !String(r.message_id).startsWith('sim-')) {
+                shotSent = 1
+                record(s, { kind: 'shot', title: x.info.title, bvid: x.info.bvid, text: line })
+                log.info(`刷完顺手发了张截图《${x.info.title}》`)
+              }
             }
           } catch (error) {
             log.warn('顺手发截图失败：', error.message)
@@ -398,7 +433,9 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         catch (error) { log.debug('本轮弹幕未完成：', error.message) }
       }
       log.info(`刷了一轮 B 站：读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
-      return { ok: true, message: `读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent }
+      const queued=queuedShares+queuedShots
+      return { ok: true, message: `读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`+
+        (queued?`；另有 ${queued} 条 QQ 分享或截图已排队`:''), watched: looked.length, commented, shared, shots: shotSent,queuedShares,queuedShots }
     } catch (error) {
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
@@ -551,7 +588,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   }
 
   return {
-    run, browseReadOnly, checkReplies, watch, watchReadOnly, comment, setSign, setAvatar, tick, account, sendShot, listShots,lifePlatform,
+    run, browseReadOnly, checkReplies, watch, watchReadOnly, comment, setSign, setAvatar, tick, account, sendShot, listShots,lifePlatform,lifeDelivery,
     libraryShots, shotFileOf, deleteShot,
     dispose() { stopped = true },
     state: () => {

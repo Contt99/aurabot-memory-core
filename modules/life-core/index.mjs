@@ -18,8 +18,9 @@ import {createContactDispatch,isContactJob} from './lib/contact-dispatch.mjs'
 import {actionCoverage} from './lib/coverage.mjs'
 import {createQzonePlatform} from './lib/qzone-platform.mjs'
 import {createBiliPlatform} from './lib/bili-platform.mjs'
+import {createBiliDelivery,isBiliQQJob} from './lib/bili-delivery.mjs'
 
-const VERSION='0.2.0-local.15'
+const VERSION='0.2.0-local.16'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -260,6 +261,12 @@ export default {
       return result
      }
      if(!continuity.contextManaged('proactive'))continue
+     if(row.module==='bili'&&isBiliQQJob(row.job)){
+      if(!biliDelivery.eligible(row)){candidates.cancel(row.id,'source-or-permission');continue}
+      const result=await propose({source:row.module,kind:'qq',target:row.target,run:()=>biliDelivery.run(row)},row)
+      if(result?.status==='deferred')continue
+      return result
+     }
      const contact=job?.kind==='contact'
      const permission=(contact?qqScope(row.target):evidenceCurrent(row))&&candidatePermission(job,row)
      if(permission==='defer')continue
@@ -362,6 +369,7 @@ export default {
    jobFor:candidateJob,canTarget:canTouch,permission:candidatePermission,context})
   const qzonePlatform=createQzonePlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const biliPlatform=createBiliPlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
+  const biliDelivery=createBiliDelivery({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,context,canTarget:canTouch})
   const managementGuard=req=>{
    try {
     const host=String(req?.headers?.host||''),hostname=new URL('http://'+host).hostname
@@ -384,7 +392,7 @@ export default {
   api.route('/telemetry',()=>({ok:true,...telemetry.snapshot()}))
   const proactiveState=()=>{const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(now()),s=ledger.kv('proactive',{day,count:0,nextAt:0});return{...s,day,count:s.day===day?s.count:0,shared:true}}
   function lastContactAckAt(target){
-   return !disposed&&authorizedChat(cfg(),target)?Math.max(candidates.latestSentAt('purpose',target),candidates.latestSentAt('speakup',target)):0
+   return !disposed&&authorizedChat(cfg(),target)?candidates.latestPrivateSentAt(target):0
   }
   api.route('/state',()=>{
    const schedules=dispatcher.inventory(),config=cfg()
@@ -398,7 +406,8 @@ export default {
    runQzoneInteraction:qzonePlatform.run,countQzoneInteractions:qzonePlatform.countToday,
    countQzoneSlots:at=>qzonePlatform.countToday(at,true),
    qzoneInteractionHistory:qzonePlatform.history,
-   runBiliInteraction:biliPlatform.run,countBiliInteractions:biliPlatform.tally,biliInteractionHistory:biliPlatform.history,
+   runBiliInteraction:biliPlatform.run,countBiliInteractions:biliPlatform.tally,biliInteractionHistory:()=>[...biliPlatform.history(),...biliDelivery.history()],
+   queueBiliDelivery:biliDelivery.queue,
    lastContactAckAt,supportsContactJob:(module,job)=>isContactJob(module,job,'contact'),
    candidateStatus:spec=>!disposed?candidates.byKey(spec)?.status:undefined,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }

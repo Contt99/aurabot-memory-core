@@ -126,11 +126,14 @@ if(!source) {
 
  test('installed host: Bili timer preserves string IDs and stays conservative on transport loss',async t=>{
   process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'bili-platform-'))
-  const {h}=makeHost(t,{sdk})
-  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0}
+  let clock=Date.now()
+  t.mock.method(Date,'now',()=>clock)
+  const {h,dispatched}=makeHost(t,{sdk,now:()=>clock})
+  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0,minIntervalMinutes:1,maxIntervalMinutes:1,maxPerDay:5}
   h.cfg.group={interests:[]}
   h.cfg.bili={enabled:true,autoBrowse:true,comment:true,like:true,reply:false,perRun:1,intervalHours:0,maxRunsPerDay:3,
-   maxCommentsPerDay:2,cookie:'SESSDATA=synthetic;bili_jct=fixture',keywords:['纸风车']}
+   maxCommentsPerDay:2,cookie:'SESSDATA=synthetic;bili_jct=fixture',keywords:['纸风车'],
+   shareToOwner:true,shotChance:1,vision:true}
   h.modules['life-core']=h.core
   h.api.core.modules={status:()=>[{id:'bili',running:'user'}]}
   const libs=Object.fromEntries(await Promise.all(['core/store.js','chat/reply.js','core/llm.js','core/img.js','core/net.js']
@@ -156,19 +159,31 @@ if(!source) {
   const libApi={...h.api,id:'bili',lib:p=>libs[p],ask:o=>askModel({llm:{
    resolveModelInfo:async()=>({}),
    async *stream(opt){
-    const text=JSON.stringify(opt.messages).includes('挑 3 个')?'["纸风车"]':'[{"i":1,"comment":"纸风车真好看呀"}]'
+    const text=JSON.stringify(opt.messages).includes('挑 3 个')?'["纸风车"]':
+     '[{"i":1,"comment":"纸风车真好看呀","share":"这条纸风车视频挺好看","feeling":"风轮好看"}]'
     yield* await h.stream(opt,[{type:'text-delta',text},{type:'finish',reason:{kind:'stop'}}])
    }
   }},{...o,model:{provider:'fixture',model:'fixture'}})}
   for(const bind of [bindBiliDuty,bindBiliTransport,bindBiliShots,bindBiliVision])bind(libApi)
   const entry=h.modules.bili=biliDuty({getConfig:libApi.config,hub:h.api.core.hub,log:{...h.api.log,debug(){}},
-   life:biliLife(libApi),ask:libApi.ask,api:upstream})
+   life:biliLife(libApi),ask:libApi.ask,api:upstream,
+   vision:async()=>({text:'看到风轮',frames:[{buf:Buffer.from([0xff,0xd8,0xff,0xd9]),sec:3}]})})
   await entry.tick()
   assert.equal(transport.length,2)
   assert.equal(rows().find(c=>c.job==='comment')?.receipt,'92000000000000001')
   assert.equal(rows().find(c=>c.job==='like')?.status,'unknown')
   assert.equal(entry.state().comments,1)
   assert.equal(h.core.proactiveState().count,0)
+  assert.equal(dispatched.length,0)
+  assert.equal(rows().filter(c=>c.status==='queued').length,2)
+  clock+=60000;await h.timers.get('统一后台调度')()
+  clock+=60000;await h.timers.get('统一后台调度')()
+  assert.equal(dispatched.length,2)
+  assert.match(dispatched[0][0].data.text,/bilibili.com\/video\/BV1234567890/)
+  assert.deepEqual(dispatched[1].map(s=>s.type),['image','text'])
+  assert.equal(rows().find(c=>c.job==='share')?.receipt,'1')
+  assert.equal(rows().find(c=>c.job==='shot')?.receipt,'2')
+  assert.equal(h.core.proactiveState().count,2)
  })
 
  for(const revoke of [false,true])test('installed hub: wake greeting '+(revoke?'stops at the last outbound guard after owner changes':'is confirmed exactly once on the native transport'),async t=>{

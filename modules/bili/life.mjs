@@ -49,6 +49,7 @@ export function createLifeAdapter(api) {
     available: () => Boolean(core()?.propose),
     platformReady:()=>typeof core()?.runBiliInteraction==='function'&&typeof core()?.performEvidence==='function',
     platform:spec=>core()?.runBiliInteraction?.(spec)||{ok:false,status:'unavailable'},
+    queueQQ:spec=>core()?.queueBiliDelivery?.(spec)||{ok:false,status:'unavailable'},
     tally:(job,reserved)=>core()?.countBiliInteractions?.(job,reserved)||0,
     history:()=>core()?.biliInteractionHistory?.()||[],
     observe:(action,run,meta)=>core()?.performEvidence?.({module:api.id,action,evidenceType:'provider',public:false,...meta},run),

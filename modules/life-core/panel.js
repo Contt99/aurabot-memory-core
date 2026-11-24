@@ -13,7 +13,7 @@ const candidateName=c=>({space:'空间日记',journal:'私人日记','space-soci
  bili:({like:'B 站点赞',comment:'B 站评论',reply:'B 站回评'}[c.job]||'B 站互动')}[candidateTarget(c)]||
  ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问',
   'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句',
-  'night/wake-greeting':'自然醒后问候'}[c.module+'/'+c.job]||c.module+' / '+c.job))
+  'night/wake-greeting':'自然醒后问候','bili/share':'分享 B 站视频','bili/shot':'发送 B 站截图'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
@@ -35,6 +35,8 @@ const candidateDetail=c=>{
   if(r==='provider-rejected')return '平台明确拒绝'
  }
  if(c.receipt)return ({space:'说说编号 ',journal:'本地记录 ',qq:'QQ 回执 '})[d]+c.receipt
+ if(r==='content-unconfirmed')return '有 QQ 回执，但无法确认内容是原链接或截图，不自动重发'
+ if(r==='frame-unavailable')return '截图库未提供可发送的原图'
  if(r==='missing-receipt')return ({space:'没有说说编号，不自动重发',journal:'未确认文件写入，不自动重试',qq:'没有 QQ 成功回执，不自动重发'})[d]
  return ({restarted:'处理时服务重启，不自动重试','source-or-permission':'来源或执行资格已变化','draft-rejected':'未取得通过检查的正文','draft-failed':'未取得可用草稿','write-failed':'文件未保存','no-interest':'本次没有选择分享',expired:'超过候选有效期',forgotten:'来源已忘记'}[r]||r)
 }
