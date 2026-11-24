@@ -46,8 +46,9 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  add('bili.qq','bili','B 站主动 QQ 分享与截图',{platform:Array.isArray(biliQQ)&&biliQQ.includes('share')&&biliQQ.includes('shot'),
   switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&(bili.shareToOwner||bili.vision&&Number(bili.shotChance)>0)):undefined,
   observed:true,window:sameDayWindow,note:'复用本轮决定；经过共享主动门禁。只有原生回执及对应链接或图片都匹配，才确认发出。'})
- add('bili.danmaku','bili','B 站自动弹幕',{switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&bili.danmakuEnabled&&bili.autoDanmaku):undefined,
-  observed:true,window:sameDayWindow,note:'仍用原模块的弹幕额度和回执，不在统一队列内。'})
+ add('bili.danmaku','bili','B 站自动弹幕',{platform:typeof api.use('bili')?.lifeDanmaku?.write==='function',
+  switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&bili.danmakuEnabled&&bili.autoDanmaku):undefined,
+  observed:true,window:sameDayWindow,note:'沿用弹幕独立额度，写前复核阅读来源和分P；以 B 站原生弹幕编号确认。'})
  add('rss.auto','rss-reader','RSS 定时阅读／转发',{clock:'fetch-tick',switchOn:rss.enabled===true,note:rss.carrier==='pool'?'当前设为只进素材池。':'提议后由原入口决定是否转发，仍未使用持久发送候选。'})
  const spaceSocial=typeof api.use('qzone-social')?.lifePlatform?.canWrite==='function'
  add('qzone-social.auto','qzone-social','空间定时互动',{clock:'interact-tick',platform:spaceSocial,switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,

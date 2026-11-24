@@ -8,12 +8,14 @@ import {createBili,bindApi as bindDuty} from '../../modules/bili/lib/bili/duty.j
 import {bindApi as bindShots} from '../../modules/bili/lib/bili/shots.js'
 import {bindApi as bindVision} from '../../modules/bili/lib/bili/vision.js'
 import {createBiliApi,bindApi as bindTransport} from '../../modules/bili/lib/bili/api.js'
+import {createDanmaku,bindApi as bindDanmaku} from '../../modules/bili/lib/modules/bili/danmaku.js'
 
-const video={bvid:'BV1234567890',aid:177,title:'纸风车',author:'示例 UP'}
+const video={bvid:'BV1234567890',aid:177,cid:178,title:'纸风车',author:'示例 UP'}
 const notice={id:'733',type:1,oid:177,root:710,parent:711,title:'纸风车',name:'示例观众',text:'风车很好看',myText:'我也喜欢'}
-function setup(t,{reply,liked,afterDraft=()=>{},beforeWrite=()=>{},share=false,shot=false,beforeQQ=()=>{},filterQQ=x=>x}={}){
+function setup(t,{reply,liked,afterDraft=()=>{},beforeWrite=()=>{},share=false,shot=false,beforeQQ=()=>{},filterQQ=x=>x,
+ danmaku=false,danmakuResult={dmid_str:'98000000000001111',platformResponse:{code:0}},beforeDanmaku=()=>{}}={}){
  const f=fixture();t.after(f.close)
- bindDuty(f.api);bindShots(f.api);bindVision(f.api)
+ bindDuty(f.api);bindShots(f.api);bindVision(f.api);bindDanmaku(f.api)
  let clock=Date.now()
  t.mock.method(Date,'now',()=>clock)
  const h=harness(t,{now:()=>clock})
@@ -21,7 +23,8 @@ function setup(t,{reply,liked,afterDraft=()=>{},beforeWrite=()=>{},share=false,s
  h.cfg.speakUp={awakeFrom:0,awakeTo:24,maxPerDay:5,idleMinutes:0,minIntervalMinutes:1,maxIntervalMinutes:1}
  h.cfg.bili={enabled:true,autoBrowse:true,reply:true,comment:true,like:true,
   cookie:'SESSDATA=synthetic;bili_jct=fixture;DedeUserID=22222',keywords:['风车'],perRun:1,
-  maxCommentsPerDay:3,maxRepliesPerDay:3,shareToOwner:share,vision:shot,shotChance:shot?1:0}
+  maxCommentsPerDay:3,maxRepliesPerDay:3,shareToOwner:share,vision:shot,shotChance:shot?1:0,
+  danmakuEnabled:danmaku,autoDanmaku:danmaku,maxDanmakuPerDay:2}
  mkdirSync(f.api.lib('core/store.js').dataDir('bili-shots'))
  h.api.core.modules={status:()=>[{id:'bili',running:'user'}]}
  h.modules['life-core']=h.core
@@ -60,14 +63,25 @@ function setup(t,{reply,liked,afterDraft=()=>{},beforeWrite=()=>{},share=false,s
  const adapterApi={...h.api,id:'bili',ask:async o=>{
   asks.push(o)
   if(o.text.includes('挑 3 个'))return '["风车"]'
+  if(o.text.includes('简短弹幕'))return '{"send":true,"text":"纸风车转起来啦","seconds":0}'
   await afterDraft(h)
   if(o.text.includes('回复你'))return '谢谢！'
   return JSON.stringify([{i:1,feeling:'喜欢风车',comment:'做得真好呀',share:share?'这段风车视频挺有意思':''}])
  }}
+ const dmWrites=[]
+ const dm=createDanmaku(adapterApi,{read:f.api.lib('core/store.js').readJson,write:f.api.lib('core/store.js').writeJson,
+  prepare:async({beforePost})=>({info:{...video,duration:60},post:async(text,progress,mode)=>{
+   await beforeDanmaku(h)
+   beforePost()
+   dmWrites.push({text,progress,mode,rows:recent()})
+   return danmakuResult
+  }})})
  const mod=h.modules.bili=createBili({getConfig:h.api.config,hub:h.api.core.hub,log:{...h.api.log,debug(){}},
   life:createLifeAdapter(adapterApi),ask:adapterApi.ask,api,
+  afterBrowse:dm.afterBrowse,
   vision:async()=>({text:'画面里有个风轮',frames:[{buf:Buffer.from([0xff,0xd8,0xff,0xd9]),sec:3}]})})
- return {...h,mod,sent,recent,asks,qq,resetLegacy:()=>f.files.clear(),
+ mod.lifeDanmaku=dm.lifeDanmaku
+ return {...h,mod,sent,recent,asks,qq,dm,dmWrites,resetLegacy:()=>f.files.clear(),
   tick:()=>{clock+=60000;return h.timers.get('统一后台调度')()}}
 }
 
@@ -190,4 +204,47 @@ test('an outbound filter replacing frame bytes cannot confirm the original Bili 
  await f.mod.run({automatic:true});await f.tick()
  assert.equal(f.qq[0].segments[0].data.file,'base64://REPLACED')
  assert.equal(f.recent().find(x=>x.job==='shot')?.status,'unknown')
+})
+
+test('automatic danmaku enters the Bili platform queue before POST and confirms its original string id',async t=>{
+ const f=setup(t,{danmaku:true})
+ await f.mod.run({automatic:true})
+ assert.equal(f.dmWrites.length,1)
+ assert.equal(f.dmWrites[0].rows.find(x=>x.job==='danmaku')?.status,'sending')
+ assert.equal(f.recent().find(x=>x.job==='danmaku')?.receipt,'98000000000001111')
+ assert.equal(f.dm.state().sentToday,1)
+ assert.equal(f.core.proactiveState().count,0)
+ assert.equal(f.dm.state().history[0].text,'纸风车转起来啦')
+ f.core.forgetPerson('10001','',{exactSources:true,sourceIds:f.recent().find(x=>x.job==='danmaku').sourceIds})
+ assert.equal(f.dm.state().history[0].text,'')
+ assert.equal(f.dm.state().attemptsToday,1)
+})
+
+test('an unconfirmed danmaku is not retried even if the old per-module mirror is absent',async t=>{
+ const f=setup(t,{danmaku:true,danmakuResult:{platformResponse:{code:0}}})
+ await f.mod.run({automatic:true})
+ f.resetLegacy();await f.mod.run({automatic:true})
+ assert.equal(f.dmWrites.length,1)
+ assert.equal(f.recent().find(x=>x.job==='danmaku')?.status,'unknown')
+ assert.equal(f.dm.state().sentToday,0)
+})
+
+test('disabling automatic danmaku at the last guard cancels before any post or quota charge',async t=>{
+ const f=setup(t,{danmaku:true,beforeDanmaku:h=>{h.cfg.bili.autoDanmaku=false}})
+ await f.mod.run({automatic:true})
+ assert.equal(f.dmWrites.length,0)
+ assert.equal(f.dm.state().attemptsToday,0)
+ assert.equal(f.recent().find(x=>x.job==='danmaku')?.status,'not-sent')
+})
+
+test('forgetting a view at the final API guard removes the automatic danmaku reservation',async t=>{
+ let f
+ f=setup(t,{danmaku:true,beforeDanmaku:({core})=>{
+  const row=f.recent().find(x=>x.job==='danmaku')
+  core.forgetPerson('10001','',{exactSources:true,sourceIds:row.sourceIds})
+ }})
+ await f.mod.run({automatic:true})
+ assert.equal(f.dmWrites.length,0)
+ assert.equal(f.dm.state().attemptsToday,0)
+ assert.deepEqual(f.recent().find(x=>x.job==='danmaku')?.sourceIds,[])
 })

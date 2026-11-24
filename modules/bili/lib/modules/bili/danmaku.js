@@ -56,12 +56,18 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
   const quotaKey = () => 'bili'
   const limit = () => Math.max(1, Math.min(20, Math.floor(Number(settings().maxDanmakuPerDay) || 3)))
   const controllers = new Set()
+  const autoIssued=new WeakMap()
   let busy = false
   let stopped = false
   const rows = () => (load().history || []).filter((row) => row.accountKey === quotaKey())
   const today = () => rows().filter((row) => row.submitted && dayKey(row.at) === dayKey(now()))
   function state() {
-    return { ok: true, busy, sentToday: today().filter((row) => row.ok).length, attemptsToday: today().length, limit: limit(), history: rows().slice(0, 20) }
+    const receipts=new Map(life.history().filter(r=>r.kind==='danmaku'&&r.id).map(r=>[r.id,r]))
+    const history=rows().slice(0,20).map(r=>{
+      const item=r.managed?receipts.get(r.id):null
+      return item?{...r,title:item.title,text:item.text}:r
+    })
+    return { ok: true, busy, sentToday: today().filter((row) => row.ok).length, attemptsToday: today().length, limit: limit(), history }
   }
   function active(key, auto) {
     const cfg = api.config()
@@ -93,7 +99,7 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
       controllers.delete(controller)
     }
   }
-  async function send(raw, { auto = false, snapshot = null } = {}) {
+  async function send(raw, { auto = false, snapshot = null, coordinated } = {}) {
     if (busy) return { ok: false, message: '上一条弹幕还在处理' }
     let input
     try {
@@ -126,37 +132,42 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
           life.checkDraft(input.text, snapshot)
           if (api.config().dryRun) throw new Error('试运行已开启，弹幕未提交')
           if (today().length >= limit()) throw new Error('弹幕提交次数已达上限')
-          submitted = true
           // 请求前留痕，超时或异常时也不会自动重发同一条。
-          record({ at, accountKey, ...input, bvid: info?.bvid || input.video, title: info?.title || '', fingerprint, submitted: true, ok: false, pending: true, auto, message: '已提交，等待平台确认' })
+          record({ at, accountKey, ...input, ...(coordinated&&{text:'',managed:true}), bvid: info?.bvid || input.video,
+            title: coordinated?'':info?.title||'', fingerprint, submitted: true, ok: false, pending: true, auto, message: '已提交，等待平台确认' })
+          coordinated?.beforePost()
+          submitted=true
         },
       })
       info = prepared.info
+      if(coordinated&&(info.bvid!==input.video||String(info.aid)!==coordinated.aid||String(info.cid)!==coordinated.cid))
+       throw Error('原视频或分P已变化，自动弹幕未提交')
       if (!Number.isFinite(info.duration) || info.duration <= 0 || input.seconds >= info.duration) throw new Error('弹幕时间超出当前分P的时长')
       fingerprint = digest(JSON.stringify([info.cid, progress, input.text]))
       if (rows().some((row) => row.submitted && row.fingerprint === fingerprint && now() - row.at < 86400_000)) throw new Error('这条弹幕已提交过，请先到 B 站确认，避免重复发送')
       active(key, auto)
       if (api.config().dryRun) throw new Error('试运行已开启，弹幕未提交')
-      const result = await life.perform('danmaku', async () => {
+      const post=async () => {
         const response = await prepared.post(input.text, progress, modes[input.position])
         const id = String(response?.dmid_str ?? (Number.isSafeInteger(response?.dmid) ? response.dmid : ''))
         if (!/^[1-9]\d*$/.test(id)) throw new Error('平台未返回弹幕编号，结果待确认')
         return response
-      }, { public: true, sourceScopes: [] })
+      }
+      const result=await (coordinated?post():life.perform('danmaku',post,{ public:true,sourceScopes:[] }))
       const id = String(result?.dmid_str ?? (Number.isSafeInteger(result?.dmid) ? result.dmid : ''))
       if (!/^[1-9]\d*$/.test(id)) throw new Error('平台未返回弹幕编号，结果待确认')
       const saved = load()
       const row = saved.history.find((item) => item.accountKey === accountKey && item.fingerprint === fingerprint && item.at === at)
-      if (row) Object.assign(row, { ok: true, pending: false, id, platformResponse: result.platformResponse, message: '平台已确认发送' })
-      write(file, saved)
+      if (row) Object.assign(row, { ok: true, pending: false, id, platformResponse: coordinated?{code:0}:result.platformResponse, message: '平台已确认发送' })
+      try{write(file, saved)}catch{api.log.warn('B 站已确认弹幕，但面板配额留痕未能更新')}
       try {
-        api.use('memory')?.addEvent?.({
+        if(!coordinated)api.use('memory')?.addEvent?.({
           text: `在 B 站《${info.title}》${info.kind === 'bangumi' ? '单集' : '第' + input.part + 'P'} ${input.seconds}秒发弹幕：${input.text}`,
           tags: ['B站', '弹幕'], importance: 0.4,
         })
       } catch (error) { api.log.warn('弹幕已发送，但经历未写入记忆') }
       return {
-        ok: true, id, message: '弹幕已发送（平台已确认）', platformResponse: result.platformResponse, title: info.title,
+        ok: true, id, dmid_str:id, message: '弹幕已发送（平台已确认）', platformResponse: result.platformResponse, title: info.title,
         url: info.url ? `${info.url}?t=${input.seconds}` : `https://www.bilibili.com/video/${info.bvid}?p=${input.part}&t=${input.seconds}`,
       }
     } catch (error) {
@@ -169,7 +180,8 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
       const saved = load()
       const row = saved.history.find((item) => item.accountKey === accountKey && item.fingerprint === fingerprint && item.at === at)
       if (row) {
-        Object.assign(row, { pending: false, blocked, message, platformResponse: error.platformResponse })
+        if(coordinated&&!submitted)saved.history=saved.history.filter(item=>item!==row)
+        else Object.assign(row, { pending: false, blocked, message, platformResponse: coordinated?{code:error.platformResponse?.code}:error.platformResponse })
         write(file, saved)
       }
       return { ok: false, uncertain: submitted, message, platformResponse: error.platformResponse }
@@ -178,10 +190,23 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
       busy = false
     }
   }
-  async function afterBrowse(watched, {allowLegacy = false} = {}) {
+  const lifeDanmaku={
+    canWrite(spec){
+      const issued=autoIssued.get(spec)
+      if(!issued||spec.job!=='danmaku'||issued.mid!==spec.account||issued.owner!==String(api.config().ownerQQ||''))return false
+      try{active(issued.key,true);return true}catch{return false}
+    },
+    write(spec,command,beforePost){
+      if(!this.canWrite(spec))return null
+      return send({video:command.bvid,text:command.text,seconds:command.seconds,position:'scroll'},
+       {auto:true,snapshot:spec.snapshot,coordinated:{aid:command.aid,cid:command.cid,beforePost}})
+    },
+  }
+  async function afterBrowse(watched, {allowLegacy = false,binding} = {}) {
     if (stopped || settings().danmakuEnabled !== true || settings().autoDanmaku !== true
       || !api.config().enabled || !settings().enabled || api.config().dryRun || !session()) return
     const key = session()
+    if(!allowLegacy&&(!life.platformReady()||binding?.key!==key||binding.owner!==String(api.config().ownerQQ||'')))return
     for (const row of watched.slice(0, 3)) {
       if (today().length >= limit() || rows().some((old) => old.auto && old.bvid === row.bvid && dayKey(old.at) === dayKey(now()))) continue
       try {
@@ -194,7 +219,13 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
         const enriched = snapshot?.text ? prompt + '\n\n' + snapshot.text : prompt
         const output = await life.runContext(snapshot, () => life.askOnce('danmaku',{system:api.core.personas?.current?.() || '',text:enriched,maxTokens:500,temperature:0.8},90000))
         const choice = JSON.parse(String(output).trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
-        if (!stopped && key === session() && choice.send === true) await send({ video: row.bvid, text: choice.text, seconds: choice.seconds, position: 'scroll' }, { auto: true, snapshot })
+        if (stopped||key!==session()||choice.send!==true)continue
+        if(allowLegacy){await send({video:row.bvid,text:choice.text,seconds:choice.seconds,position:'scroll'},{auto:true,snapshot});continue}
+        if(!row.experienceId||typeof choice.text!=='string'||[...choice.text].length>30||typeof choice.seconds!=='number')continue
+        const spec=Object.freeze({job:'danmaku',account:binding.mid,bvid:row.bvid,sourceId:row.experienceId,
+         text:cleanOutboundText(choice.text),seconds:choice.seconds,snapshot})
+        autoIssued.set(spec,binding)
+        try{await life.platform(spec)}finally{autoIssued.delete(spec)}
       } catch { api.log.warn('本轮自动弹幕未生成或未提交') }
     }
   }
@@ -202,7 +233,7 @@ export function createDanmaku(api, { prepare = prepareDanmaku, now = Date.now, r
     stopped = true
     for (const controller of controllers) controller.abort()
   })
-  return { send, inspect, state, afterBrowse }
+  return { send, inspect, state, afterBrowse,lifeDanmaku }
 }
 
 export function bindApi(api) {

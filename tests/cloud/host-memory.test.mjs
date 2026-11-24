@@ -27,6 +27,7 @@ import { createBili as biliDuty, bindApi as bindBiliDuty } from '../../modules/b
 import { createBiliApi, bindApi as bindBiliTransport } from '../../modules/bili/lib/bili/api.js'
 import { bindApi as bindBiliShots } from '../../modules/bili/lib/bili/shots.js'
 import { bindApi as bindBiliVision } from '../../modules/bili/lib/bili/vision.js'
+import { createDanmaku, bindApi as bindBiliDanmaku } from '../../modules/bili/lib/modules/bili/danmaku.js'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -133,23 +134,30 @@ if(!source) {
   h.cfg.group={interests:[]}
   h.cfg.bili={enabled:true,autoBrowse:true,comment:true,like:true,reply:false,perRun:1,intervalHours:0,maxRunsPerDay:3,
    maxCommentsPerDay:2,cookie:'SESSDATA=synthetic;bili_jct=fixture',keywords:['纸风车'],
-   shareToOwner:true,shotChance:1,vision:true}
+   shareToOwner:true,shotChance:1,vision:true,danmakuEnabled:true,autoDanmaku:true,maxDanmakuPerDay:3}
   h.modules['life-core']=h.core
   h.api.core.modules={status:()=>[{id:'bili',running:'user'}]}
-  const libs=Object.fromEntries(await Promise.all(['core/store.js','chat/reply.js','core/llm.js','core/img.js','core/net.js']
+  const libs=Object.fromEntries(await Promise.all(['core/store.js','chat/reply.js','core/llm.js','core/img.js','core/net.js','core/text.js']
    .map(async p=>[p,await import(pathToFileURL(path.join(source,p)))])))
   const {askModel}=libs['core/llm.js']
   const transport=[]
   const rows=()=>h.routes.get('/candidates')({headers:{host:'localhost'}}).items
-  const fixtureVideo={aid:99007,bvid:'BV1234567890',title:'纸风车',author:'示例 UP'}
+  const fixtureVideo={aid:99007,cid:99008,bvid:'BV1234567890',title:'纸风车',author:'示例 UP',duration:60}
   const client=createBiliApi({getCookie:()=>h.cfg.bili.cookie,fetchImpl:async(url,req)=>{
    const endpoint=new URL(url).pathname
-   if(endpoint==='/x/web-interface/nav')return new Response(JSON.stringify({code:0,data:{isLogin:true,mid:22222}}))
+   if(endpoint==='/x/web-interface/nav')return new Response(JSON.stringify({code:0,data:{isLogin:true,mid:22222,
+    wbi_img:{img_url:'https://fixture.invalid/00000000000000000000000000000000.png',sub_url:'https://fixture.invalid/11111111111111111111111111111111.png'}}}))
    assert.equal(req.method,'POST')
    const form=new URLSearchParams(req.body)
    assert.equal(form.get('aid')||form.get('oid'),'99007')
-   assert.ok(rows().find(c=>c.status==='sending')?.sourceIds.length)
+   const writing=rows().find(c=>c.status==='sending')
+   assert.ok(writing?.sourceIds.length)
    transport.push(endpoint)
+   if(endpoint==='/x/v2/dm/post'){
+    assert.equal(writing.job,'danmaku')
+    assert.equal(form.get('oid'),'99008')
+    return new Response(JSON.stringify({code:0,data:{dmid_str:'95000000000012345'}}))
+   }
    if(endpoint==='/x/v2/reply/add')return new Response(JSON.stringify({code:0,data:{reply:{rpid_str:'92000000000000001'}}}))
    assert.equal(endpoint,'/x/web-interface/archive/like')
    throw Error('synthetic transport lost after submit')
@@ -159,19 +167,25 @@ if(!source) {
   const libApi={...h.api,id:'bili',lib:p=>libs[p],ask:o=>askModel({llm:{
    resolveModelInfo:async()=>({}),
    async *stream(opt){
-    const text=JSON.stringify(opt.messages).includes('挑 3 个')?'["纸风车"]':
+    const prompt=JSON.stringify(opt.messages)
+    const text=prompt.includes('挑 3 个')?'["纸风车"]':prompt.includes('简短弹幕')?'{"send":true,"text":"风轮转起来啦","seconds":0}':
      '[{"i":1,"comment":"纸风车真好看呀","share":"这条纸风车视频挺好看","feeling":"风轮好看"}]'
     yield* await h.stream(opt,[{type:'text-delta',text},{type:'finish',reason:{kind:'stop'}}])
    }
   }},{...o,model:{provider:'fixture',model:'fixture'}})}
-  for(const bind of [bindBiliDuty,bindBiliTransport,bindBiliShots,bindBiliVision])bind(libApi)
+  for(const bind of [bindBiliDuty,bindBiliTransport,bindBiliShots,bindBiliVision,bindBiliDanmaku])bind(libApi)
+  const dm=createDanmaku(libApi,{prepare:async({beforePost,signal})=>({info:fixtureVideo,
+   post:(text,seconds,mode)=>client.postDanmaku(fixtureVideo,text,seconds,mode,{beforePost,signal})})})
   const entry=h.modules.bili=biliDuty({getConfig:libApi.config,hub:h.api.core.hub,log:{...h.api.log,debug(){}},
-   life:biliLife(libApi),ask:libApi.ask,api:upstream,
+   life:biliLife(libApi),ask:libApi.ask,api:upstream,afterBrowse:dm.afterBrowse,
    vision:async()=>({text:'看到风轮',frames:[{buf:Buffer.from([0xff,0xd8,0xff,0xd9]),sec:3}]})})
+  entry.lifeDanmaku=dm.lifeDanmaku
   await entry.tick()
-  assert.equal(transport.length,2)
+  assert.equal(transport.length,3)
   assert.equal(rows().find(c=>c.job==='comment')?.receipt,'92000000000000001')
   assert.equal(rows().find(c=>c.job==='like')?.status,'unknown')
+  assert.equal(rows().find(c=>c.job==='danmaku')?.receipt,'95000000000012345')
+  assert.equal(dm.state().sentToday,1)
   assert.equal(entry.state().comments,1)
   assert.equal(h.core.proactiveState().count,0)
   assert.equal(dispatched.length,0)

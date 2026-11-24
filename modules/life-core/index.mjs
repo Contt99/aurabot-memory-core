@@ -20,7 +20,7 @@ import {createQzonePlatform} from './lib/qzone-platform.mjs'
 import {createBiliPlatform} from './lib/bili-platform.mjs'
 import {createBiliDelivery,isBiliQQJob} from './lib/bili-delivery.mjs'
 
-const VERSION='0.2.0-local.16'
+const VERSION='0.2.0-local.17'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -251,7 +251,8 @@ export default {
    try{
     const ready=candidates.ready()
     for(const row of ready){
-     if(row.module==='qzone-social'&&row.target.startsWith('qzone-post:')||row.module==='bili'&&row.target.startsWith('bili-video:')){
+     if(row.module==='qzone-social'&&row.target.startsWith('qzone-post:')||
+        row.module==='bili'&&/^(bili-video|bili-danmaku):/.test(row.target)){
       candidates.cancel(row.id,'interrupted-before-write');continue
      }
      const job=candidateJob(row.module,row.job)

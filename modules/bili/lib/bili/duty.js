@@ -318,7 +318,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     busy = true
     let s = today(load())
     try {
-      const binding=managed&&(c.comment||c.like)&&!getConfig().dryRun?await loginBinding():null
+      const binding=managed&&(c.comment||c.like||c.danmakuEnabled&&c.autoDanmaku)&&!getConfig().dryRun?await loginBinding():null
       if(binding)s=today(load()) // nav can persist recovery of a stale login pause
       const seen = new Set(s.seen)
       const kws = await chooseKeywords(allowLegacy)
@@ -429,7 +429,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       if (!force) s.runs++
       s.lastRun = Date.now()
       if (afterBrowse) {
-        try { await afterBrowse(looked.map(({ info }) => ({ bvid: info.bvid, title: info.title, text: felt.get(info.bvid) || '' })), {allowLegacy}) }
+        try { await afterBrowse(looked.map(({ info,experienceId }) => ({ bvid: info.bvid, title: info.title, text: felt.get(info.bvid) || '',experienceId })), {allowLegacy,binding}) }
         catch (error) { log.debug('本轮弹幕未完成：', error.message) }
       }
       log.info(`刷了一轮 B 站：读取了 ${looked.length} 个视频的资料，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)

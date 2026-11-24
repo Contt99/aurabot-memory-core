@@ -8,9 +8,9 @@ const purposeLabel=s=>({chat:'普通聊天',proactive:'主动联系',autonomy:'�
 const typeLabel=s=>({message:'收到的消息',utterance:'说过',action:'行动',observation:'观察',reflection:'反思',task:'任务',commitment:'承诺',fact:'精选事实',profile:'人物关系',media:'图片身份'}[s]||s||'类型未知')
 const capabilityLabel=id=>({web_search:'搜索网页',web_fetch:'读取网页',bili_browse:'逛 B 站',bili_watch:'读取 B 站视频',tieba_search:'搜索贴吧',tieba_browse:'浏览贴吧',tieba_read:'阅读贴吧正文',save_note:'保存笔记'}[id]||id)
 const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子正文','video-metadata':'视频资料','web-body':'网页正文','search-summary':'搜索摘要','confirmed-speech':'已发送原话','qq-ack':'QQ 回执',provider:'模块结果',note:'笔记',tool:'工具结果','tool-result':'工具结果'}[id]||id)
-const candidateTarget=c=>c.target?.startsWith('bili-video:')?'bili':c.target?.startsWith('qzone-post:')?'space-social':c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
+const candidateTarget=c=>/^bili-(video|danmaku):/.test(c.target)?'bili':c.target?.startsWith('qzone-post:')?'space-social':c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
 const candidateName=c=>({space:'空间日记',journal:'私人日记','space-social':({'like':'空间点赞',comment:'空间评论',reply:'空间回复'}[c.job]||'空间互动'),
- bili:({like:'B 站点赞',comment:'B 站评论',reply:'B 站回评'}[c.job]||'B 站互动')}[candidateTarget(c)]||
+ bili:({like:'B 站点赞',comment:'B 站评论',reply:'B 站回评',danmaku:'B 站弹幕'}[c.job]||'B 站互动')}[candidateTarget(c)]||
  ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问',
   'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句',
   'night/wake-greeting':'自然醒后问候','bili/share':'分享 B 站视频','bili/shot':'发送 B 站截图'}[c.module+'/'+c.job]||c.module+' / '+c.job))
@@ -25,7 +25,7 @@ const candidateLabel=c=>{
 const candidateDetail=c=>{
  const d=candidateTarget(c),r=c.reason
  if(d==='bili'){
-  if(c.receipt)return c.job==='like'?'平台确认（点赞没有单独编号）':'B 站评论编号 '+c.receipt
+  if(c.receipt)return c.job==='like'?'平台确认（点赞没有单独编号）':(c.job==='danmaku'?'B 站弹幕编号 ':'B 站评论编号 ')+c.receipt
   if(r==='missing-receipt'||r==='restarted')return '结果待平台确认，不自动重发'
   if(r==='provider-rejected')return 'B 站明确拒绝'
  }
