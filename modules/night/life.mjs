@@ -6,6 +6,10 @@ export function createLifeAdapter(api) {
     if (!warned) { warned = true; api.log.warn('life-core 不可用：保留原有操作，本轮没有共享经历/主动额度覆盖') }
   }
   return {
+    queueGreeting: spec => {
+      const c=core()
+      return c?.supportsContactJob?.(api.id,'wake-greeting') ? c.queueCandidate({...spec,module:api.id,job:'wake-greeting'}) : null
+    },
     hasCompiler: () => typeof core()?.contextManaged === 'function',
     contextManaged: purpose => Boolean(core()?.contextManaged?.(purpose)),
     prepareContext(options) {

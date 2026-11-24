@@ -11,7 +11,7 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  const modules=api.core.modules?.status?.()
  if(!Array.isArray(modules))return null
  const running=new Set(modules.filter(m=>m.running).map(m=>m.id))
- const ext=config.ext||{},su=config.speakUp||{},diary=config.diary||{},a=ext.autonomy||{},tieba=ext['tieba-reader']||{},rss=ext['rss-reader']||{}
+ const ext=config.ext||{},su=config.speakUp||{},diary=config.diary||{},a=ext.autonomy||{},tieba=ext['tieba-reader']||{},rss=ext['rss-reader']||{},night=ext.night||{}
  const qFrom=minute(su.awakeFrom??9),qTo=minute(su.awakeTo??23)
  const shared=describe(qFrom,qTo)
  const sameDayWindow=qFrom!==null&&qTo!==null&&qFrom>=qTo?'现有设置无有效时段':shared
@@ -44,7 +44,22 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  const spaceSocial=typeof api.use('qzone-social')?.lifePlatform?.canWrite==='function'
  add('qzone-social.auto','qzone-social','空间定时互动',{clock:'interact-tick',platform:spaceSocial,switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,
   note:spaceSocial?'点赞以网关确认为准，评论和回复核对新编号；占用单独的空间互动配额。':'未发现统一空间出口。'})
- add('night.auto','night','长夜如梦／醒后问候',{switchOn:ext.night?.enabled,note:'睡眠、梦和醒后出口由夜间模块管理。'})
+ const morning=hm(night.wakeTime??'08:00'),jitter=Math.max(0,Math.min(90,Math.round(Number(night.wakeJitterMinutes??40))))
+ const wakeZone=night.timeZone||'Asia/Shanghai',tod=m=>(m+1440)%1440
+ const wakeWindow=morning!==null&&Number.isFinite(jitter)?describe(tod(morning-jitter),tod(morning+jitter))+' '+wakeZone:''
+ add('night.dream','night','长夜如梦 · 自动梦境',{clock:'night-action-tick',platform:api.use('night')?.recordsDreamOutcome===true,
+  switchOn:night.enabled!==false&&night.dreamEnabled!==false&&night.dreamAutoEnabled!==false,
+  window:night.dreamInRemOnly===false?'睡眠中':'REM 睡眠阶段',
+  note:'仍按夜间模块的生成间隔和上限。只记保存结果，梦境正文不进入共享记忆。'})
+ add('night.wake','night','自然醒后问候',{clock:'night-action-tick',jobs:['wake-greeting'],switchOn:night.enabled!==false&&night.morningGreeting===true,
+  window:wakeWindow?'夜间起床计划 '+wakeWindow+'；QQ '+shared:shared,
+  note:'自然醒后 5 分钟有效（包括午睡醒来）；通过共享私聊门禁才生成，实发用原生消息编号确认。'})
+ if(running.has('night')&&night.enabled!==false&&night.morningGreeting===true&&morning!==null&&Number.isFinite(jitter)&&qFrom!==null&&qTo!==null){
+  let sameZone=false
+  try{sameZone=Intl.DateTimeFormat('en',{timeZone:wakeZone}).resolvedOptions().timeZone===tz}catch{}
+  if(sameZone&&!Array.from({length:2*jitter+5},(_,i)=>tod(morning-jitter+i)).some(m=>covers(qFrom,qTo,m)))
+   conflicts.push('夜间自然醒的整个计划窗口（含醒后 5 分钟）落在 QQ 安静时段内；在现有配置下，夜间起床问候会过期。')
+ }
  add('impression.auto','impression-card','印象卡片的主动微调',{
   switchOn:ext['impression-card']?.enabled!==false&&ext['impression-card']?.proactiveEnabled===true,note:'仍由印象卡模块检查；与被动查卡分开。'})
  add('pet.local','pet','桌宠气泡与内部回落',{switchOn:ext.purpose?.carrier==='pet'?true:undefined,note:'没有本地气泡接收的可追溯回执。'})

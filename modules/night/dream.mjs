@@ -2,7 +2,7 @@
 //
 // 设计要点：
 // - 五档强度 1~5，越强记得越久（每天衰减 0.30 / 0.22 / 0.15 / 0.08 / 0.03）
-// - 梦不是现实：只写进私人梦境记录，往记忆里只留一句「做过梦」，不写内容
+// - 梦不是现实：正文只写进私人梦境记录，核心只收主人范围内的反思回执
 // - 生成失败不补、不重试，跳过这一次
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -69,13 +69,15 @@ export class Dreamer {
     this.items = Array.isArray(raw) ? raw.filter((x) => x && x.id && x.text) : []
   }
 
-  save() {
+  save(items = this.items) {
     try {
       const tmp = `${this.file}.tmp`
-      writeFileSync(tmp, JSON.stringify(this.items, null, 2), 'utf8')
+      writeFileSync(tmp, JSON.stringify(items, null, 2), 'utf8')
       renameSync(tmp, this.file)
+      return true
     } catch (error) {
       this.log.warn('保存梦境失败：' + (error?.message || error))
+      return false
     }
   }
 
@@ -149,13 +151,14 @@ export class Dreamer {
     }
   }
 
-  async make({ kind = 'night', mood = '', continuation = '', persist = true, manual = true } = {}) {
+  async make({ kind = 'night', mood = '', continuation = '', persist = true, manual = true, record = true, stillCurrent } = {}) {
     const cfg = this.cfg
     if (!cfg.dreamEnabled) return null
     const owner = currentOwner(this.api)
     const observe = async (ok, entry) => {
       // The dream body/tags/material never enter the shared ledger. A revoked owner
       // must not be relabelled as the new owner while generation is in flight.
+      if (!persist || !record) return
       if (!owner || currentOwner(this.api) !== owner) {
         this.log.warn('night：life-core 梦境来源主人已变化或不可确认，未记录经历')
         return
@@ -199,6 +202,7 @@ export class Dreamer {
     try {
       if (snapshot) this.api.use('life-core').assertContextCurrent(snapshot)
       if (currentOwner(this.api) !== owner) throw Error('梦境主人已变化')
+      if (stillCurrent && !stillCurrent()) throw Error('本段睡眠已结束或自动梦境已关闭')
     } catch (error) { this.log.warn('梦境未保存：'+error.message); await observe(false); return null }
     const data = extractJson(raw)
     const text = String(data?.text || '').trim()
@@ -221,26 +225,12 @@ export class Dreamer {
       decayAt: now,
       pinned: false,
     }
-    if (!persist) { await observe(true, entry); return entry }
+    if (!persist) return entry
+    const next=[entry,...this.items].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0,MAX_KEEP)
+    if(!this.save(next)){await observe(false);return null}
+    this.items=next
 
-    this.items.push(entry)
-    // 只留最近的 200 条，先扔过期最久的
-    this.items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-    if (this.items.length > MAX_KEEP) this.items = this.items.slice(0, MAX_KEEP)
-    this.save()
-
-    try {
-      const memory = this.api.use('memory')
-      memory?.addEvent?.({
-        text: '我昨晚做了一段梦（内容只留在私人梦境记录里，不当作现实）',
-        tags: ['梦'],
-        importance: Math.min(1, 0.2 * level),
-      })
-    } catch {
-      // 记忆模块没开就不记
-    }
-
-    this.log.info(`长夜：做了一段梦（${level} 级，${dreamTags.join('、')}）`)
+    this.log.info(`长夜：做了一段梦（${level} 级）`)
     await observe(true, entry)
     return entry
   }

@@ -52,6 +52,7 @@ async function fixture(t, time, settings = {}) {
     contextManaged: () => true, buildContext: (input) => ({ id: 'synthetic', text: '', ...input }),
     assertContextCurrent() {}, runWithContext: (_snapshot, task) => task(),
     validateDraft: () => ({ ok: true }), recordOutcome() {},
+    perform: (_meta,run) => run(),
   }
   const api = {
     config: () => ({ ownerQQ: owner }),
@@ -74,7 +75,7 @@ async function fixture(t, time, settings = {}) {
       level: 5, strength: 1, decayAt: now, pinned: true,
     }]))
   }
-  const { service, snapshot, dream } = await night.setup(api)
+  const { service, snapshot, dream, lifeSchedules } = await night.setup(api)
   async function conversation(msg) {
     assert.equal(await hooks.get('message')(msg), false)
     const info = { chat: msg, chatId: msg.chatId, userText: msg.text }
@@ -83,7 +84,7 @@ async function fixture(t, time, settings = {}) {
     await hooks.get('activity')({ kind: 'out', chatId: msg.chatId })
     return { prompt, reply }
   }
-  return { service, snapshot, dream, commands, routes, hooks, asks, mutes, heartbeat, conversation,
+  return { service, snapshot, dream, commands, routes, hooks, asks, mutes, heartbeat, conversation, actionTick:lifeSchedules()[0].run,
     advance: (minutes) => { now += minutes * minute } }
 }
 
@@ -184,6 +185,7 @@ test('automatic dreams can be disabled without losing existing dreams or explici
   await f.commands.get('睡')('', incoming('/睡'))
   f.advance(61)
   await f.heartbeat()
+  await f.actionTick()
   assert.equal(f.asks.length, 0)
   assert.equal(f.service.state.dreamCount, 0)
   assert.match(await f.commands.get('梦')('', incoming('/梦')), /合成旧梦/)
@@ -198,6 +200,7 @@ test('installations without the automatic dream override keep the enabled dream 
   await f.commands.get('睡')('', incoming('/睡'))
   f.advance(61)
   await f.heartbeat()
+  await f.actionTick()
   assert.equal(f.asks.length, 1)
   assert.equal(f.service.state.dreamCount, 1)
 })

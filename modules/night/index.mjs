@@ -20,7 +20,7 @@ import * as energy from './energy.mjs'
 import * as stages from './stages.mjs'
 import { currentOwner, ownerPrivateChat, ownerToolCall } from './privacy.mjs'
 
-const VERSION = '1.0.3-local.sleep.1'
+const VERSION = '1.0.3-local.sleep.2'
 const DEFAULTS = {
   enabled: true,
   wakeTime: '08:00',
@@ -133,7 +133,7 @@ const SETTINGS = [
   { key: 'byeMuteMinutes', label: '其他会话收线后闭嘴多久（分钟）', type: 'number' },
   { key: 'noonMuteMinutes', label: '午睡收线后闭嘴多久（分钟）', type: 'number' },
 
-  { key: 'morningGreeting', label: '自然醒后给主人发早安', type: 'switch' },
+  { key: 'morningGreeting', label: '自然醒后给主人问好', type: 'switch', hint:'起床后 5 分钟内，须满足共享主动私聊的时段、空闲和额度。' },
   { key: 'timeZone', label: '作息按哪个时区（容器跑 UTC 时要填）', type: 'text' },
 ]
 
@@ -278,53 +278,81 @@ export default {
     const DENY_READ = { ok: false, denied: true, message: '只接受同源请求（防跨站读取作息和梦境）' }
     const DENY_WRITE = { ok: false, denied: true, message: '只接受同源请求（防跨站改她的作息）' }
 
-    let lastDreamAttempt = 0
+    let greetingRequest
+    let disposed=false
     let farewellBusy = false
     const dreamDenied = '梦境正文只向当前主人本人的私聊开放。'
 
-    const morningGreeting = async () => {
+    const wakeIntent = () => {
       const cfg = cfgOfFn()
-      if (!cfg.morningGreeting) return
-      const owner = currentOwner(api)
-      if (!owner) return
-      let text = ''
-      let snapshot
-      try {
-        snapshot = life.prepareContext({purpose:'proactive',chatId:`private:${owner}`,query:''})
-        text = await life.runContext(snapshot, () => api.ask({
-          system: '你刚睡醒。用一句很短的话告诉对方你醒了，别解释设定。不要用括号动作。',
-          text: `现在是${energy.clockText(Date.now())}。${snapshot?.text ? '\n\n'+snapshot.text : ''}`,
-          maxTokens: 120,
-        }))
-      } catch (error) {
-        if (life.hasCompiler() || !api.use('life-core')) { api.log.warn('长夜：早安生成失败 '+error.message); return }
-        text = ''
-      }
-      text = String(text || '').trim() || '早，我醒了。'
-      // 模型请求期间主人配置可能已变；不能把旧全局梦发给已撤销的接收人。
-      if (currentOwner(api) !== owner) return
-      try {
-        life.checkDraft(text,snapshot)
-        await life.runContext(snapshot, () => { if (currentOwner(api) !== owner) throw Error('主人已变化'); life.checkDraft(text,snapshot); return api.send(`private:${owner}`, text) })
-      } catch (error) {
-        api.log.warn('长夜：早安消息发送失败 ' + (error?.message || error))
-      }
+      const notice=service.state.wakeNotice,now=Date.now()
+      if(!cfg.enabled||!cfg.morningGreeting||service.state.mode===ASLEEP||!notice?.owner||
+       notice.owner!==currentOwner(api)||!Number.isSafeInteger(notice.at)||notice.at>now||now>=notice.at+300_000)return null
+      return {target:'private:'+notice.owner,key:'wake-'+notice.at,expiresAt:notice.at+300_000}
+    }
+    const greetingJob={
+      id:'wake-greeting',kind:'contact',
+      canRun(row){
+        const intent=wakeIntent()
+        return !!intent&&intent.target===row.target&&intent.key===row.jobKey&&intent.expiresAt===row.expiresAt
+      },
+      async run(row,commit){
+        if(greetingRequest)return {outcome:'failed'}
+        const snapshot=life.prepareContext({purpose:'proactive',chatId:row.target,query:''})
+        const operation=Promise.resolve().then(()=>life.runContext(snapshot,()=>api.ask({
+          system:'你刚自然醒。用一句很短的话给主人打招呼。只说这次自然醒，不提梦境，不猜对方在做什么，不用括号动作。',
+          text:`现在是${energy.clockText(Date.now())}。${snapshot.text?'\n\n'+snapshot.text:''}`,maxTokens:120,
+        })))
+        greetingRequest=operation
+        operation.finally(()=>{if(greetingRequest===operation)greetingRequest=null}).catch(()=>{})
+        let timer,text
+        try{
+          text=String(await Promise.race([operation,new Promise((_,reject)=>{
+           timer=setTimeout(()=>reject(Error('早安模型超时')),90_000)
+          })])||'').trim()||'我刚醒啦。'
+        }catch{api.log.warn('长夜：没取得起床问候正文');return {outcome:'failed'}}
+        finally{clearTimeout(timer)}
+        if(text.replace(/\s/g,'').startsWith('[沉默]'))return {outcome:'silent'}
+        if(text.length>180)return {outcome:'failed'}
+        const receipt=await commit({snapshot,text},({sendQQ})=>sendQQ())
+        if(receipt.ok&&receipt.text)try{
+          api.core.hub.logChat?.(row.target,'bot',receipt.text)
+          api.emit?.('activity',{kind:'out',chatId:row.target,reply:receipt.text,userText:'【系统提醒】自然醒后问候'})
+        }catch{}
+        return {outcome:receipt.ok?'sent':'delivery-failed'}
+      },
     }
 
     const maybeDream = async () => {
       const cfg = cfgOfFn()
       const s = service.state
       if (!cfg.enabled || !cfg.dreamEnabled || !cfg.dreamAutoEnabled || s.mode !== ASLEEP) return
-      if (!api.use('life-core')) return
+      const owner=currentOwner(api),core=api.use('life-core')
+      if(!owner||!core?.contextManaged?.('proactive')||typeof core?.perform!=='function')return
       const now = Date.now()
+      if(s.wakeAt<=now)return
       const stage = service.stage(now)
       if (!dreamer.due({ sleepAt: s.sleepAt, already: s.dreamCount, stage, dreamSkip: s.dreamSkip, now })) return
       const interval = Math.max(5, Number(cfg.dreamIntervalMinutes) || 60) * 60_000
-      if (lastDreamAttempt && now - lastDreamAttempt < interval) return
-      lastDreamAttempt = now
+      const before=s.dreamAttemptAt
+      if (before&&now-before<interval) return
+      const sleepAt=s.sleepAt
+      s.dreamAttemptAt=now
       s.dreamCount += 1
-      await service.save()
-      await dreamer.make({ kind: s.sleepKind, manual: false })
+      if(!await service.save()){s.dreamAttemptAt=before;s.dreamCount-=1;return}
+      const stillCurrent=()=>{
+        const current=cfgOfFn()
+        return !disposed&&api.use('life-core')===core&&currentOwner(api)===owner&&current.enabled&&current.dreamEnabled&&current.dreamAutoEnabled&&
+         s.mode===ASLEEP&&s.sleepAt===sleepAt&&s.wakeAt>Date.now()
+      }
+      const scope='private:'+owner
+      await core.perform({module:'night',action:'dream-generate',callId:'sleep-'+sleepAt+'-dream-'+s.dreamCount,
+       kind:'reflection',evidenceType:'reflection',public:false,self:true,chatId:scope,sourceScopes:[scope]},async()=>{
+        if(!stillCurrent())return {ok:false,status:'interrupted',message:'本段睡眠已结束或自动梦境已关闭'}
+        const entry=await dreamer.make({kind:s.sleepKind,manual:false,stillCurrent,record:false})
+        return entry?{ok:true,dreamId:entry.id,message:'已保存私人梦境反思'}:
+         {ok:false,status:stillCurrent()?'failed':'interrupted',message:'梦境未保存'}
+      })
     }
 
     // ---------------------------------------------------------------- 消息
@@ -423,8 +451,7 @@ export default {
         if (!service.pendingSleep) return
         const p = service.pendingSleep
         service.pendingSleep = null
-        const ok = await service.sleepNow({ reason: p.reason, kind: p.kind, byUser: false })
-        if (ok) lastDreamAttempt = 0
+        await service.sleepNow({ reason: p.reason, kind: p.kind, byUser: false })
       })
       if (!line) return
       if (isFarewell(text)) return
@@ -443,20 +470,19 @@ export default {
       if (!pending) return
       if (pending.chatId && a.chatId && pending.chatId !== a.chatId) return
       service.pendingSleep = null
-      const ok = await service.sleepNow({ reason: pending.reason, kind: pending.kind, byUser: false })
-      if (ok) lastDreamAttempt = 0
+      await service.sleepNow({ reason: pending.reason, kind: pending.kind, byUser: false })
     })
 
     // ---------------------------------------------------------------- 心跳
-    api.every(60_000, async () => {
-      if (!cfgOfFn().enabled) return
-      const events = await service.tick()
-      if (events.includes('wake_natural')) {
-        lastDreamAttempt = 0
-        await morningGreeting()
-      }
+    // State ticks are not model/network actions. Keep sleep clocks running even
+    // when autonomous actions are paused.
+    api.every(60_000, () => cfgOfFn().enabled ? service.tick() : undefined, '长夜作息心跳')
+    const actionClock={id:'night-action-tick',label:'梦境与起床问候到期检查',intervalMs:60_000,run:async()=>{
+      if(!cfgOfFn().enabled)return
+      const notice=wakeIntent()
+      if(notice)life.queueGreeting(notice)
       await maybeDream()
-    }, '长夜心跳')
+    }}
 
     // ---------------------------------------------------------------- 命令
     api.command({
@@ -657,12 +683,16 @@ export default {
     })
 
     api.onDispose(async () => {
+      disposed=true
       await service.save()
     })
 
     api.log.info(`长夜如梦已启动：${service.statusText()}`)
     return {
       service,
+      recordsDreamOutcome:true,
+      lifeSchedules:()=>[actionClock],
+      lifeJobs:()=>[greetingJob],
       dreamer,
       status: () => service.statusText(),
       snapshot: () => service.snapshot(),

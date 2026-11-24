@@ -11,7 +11,8 @@ const evidenceLabel=id=>({'platform-read':'平台读取','thread-body':'帖子�
 const candidateTarget=c=>c.target?.startsWith('qzone-post:')?'space-social':c.target?.startsWith('qzone:')?'space':c.target==='server:private-journal'?'journal':'qq'
 const candidateName=c=>({space:'空间日记',journal:'私人日记','space-social':({'like':'空间点赞',comment:'空间评论',reply:'空间回复'}[c.job]||'空间互动')}[candidateTarget(c)]||
  ({'tieba-reader/share':'贴吧分享','purpose/contact':'主动搭话','purpose/nudge':'主动追问',
-  'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句'}[c.module+'/'+c.job]||c.module+' / '+c.job))
+  'speakup/contact':'旧主动搭话','speakup/nudge':'旧主动搭话 · 追问','speakup/autonomy':'自主生活 · 想聊几句',
+  'night/wake-greeting':'自然醒后问候'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
@@ -193,18 +194,6 @@ function Panel(){
    meta([r.switchState==='off'?'设置关闭':'',r.window,r.checkMinutes?'每 '+r.checkMinutes+' 分钟检查':'',r.lastCheckAt?'上次检查 '+dateLabel(r.lastCheckAt):''].filter(Boolean).join(' · ')),
    r.note?paragraph(r.note):null)))
   return h('div',null,
-   h('section',{style:box},h('h3',null,'记忆健康'),resourceMessage(memoryResource,'记忆状态'),memory?h('div',null,
-    paragraph('统一编排：'+(memory.managed?'已接管普通聊天':'未接管普通聊天，当前为降级状态')),
-    paragraph('模型请求观察器：'+(memory.streamReady?'已接入':'未接入')),
-    paragraph('有效事件 '+memory.events+' 条 · 待补入 '+memory.pendingHandoffs+' 条'),
-    paragraph('待补入是资料衔接，不是消息重发队列。'),paragraph('每轮记忆块上限：'+memory.budget+' 字符'),
-    memory.lastError?h('p',{role:'alert'},'最近记录错误：'+memory.lastError):paragraph('最近记录错误：接口未报告错误'),
-    h('h4',null,'来源接口就绪状态'),memory.providers?h('div',null,...[['vault','聊天原文库'],['memory','精选记忆'],['impression','人物关系'],['image','图片理解']].map(([key,label])=>paragraph(label+'：'+(memory.providers[key]?'已就绪':'未就绪')))):paragraph('接口未提供来源就绪状态。'),
-    h('h4',null,'存储'),memory.storage?h('div',null,paragraph('行动库：'+bytesLabel(memory.storage.lifeBytes)+' · WAL：'+bytesLabel(memory.storage.walBytes)),paragraph('可用磁盘空间：'+bytesLabel(memory.storage.freeBytes)),memory.storage.lowSpace?h('p',{role:'alert'},'服务器磁盘空间不足，请扩容或清理无关文件；不会自动删除历史原文。'):null):paragraph('存储占用：当前接口未提供。')):null,
-    state?.schedules?.length?fine('统一调度已登记的到期检查（'+state.schedules.length+'项）',
-     paragraph('到期检查不等于工具已执行；实际结果见最近经历。'),
-     h('ul',{className:'lc-list'},...state.schedules.map(s=>h('li',{key:s.module+':'+s.id},h('strong',null,s.label),meta(({waiting:'待首次检查',checking:'检查中',checked:'已检查','check-failed':'检查失败'}[s.status]||'状态未知')+(s.checkedAt?' · '+dateLabel(s.checkedAt):'')))))):null,
-    !coverage?paragraph('入口覆盖清单：当前接口未提供，不能据此判断每个后台入口均已接入。'):null),
    h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('这里只显示经持久队列处理的行动。看回执可确认实际发布、发送或服务器保存。'),
     resourceMessage(candidateResource,'后台回执'),
     candidates?.length?h('ul',{className:'lc-list'},...candidates.map(c=>h('li',{key:c.id},
@@ -219,6 +208,18 @@ function Panel(){
      const rows=coverage.entries.filter(r=>r.mode===mode)
      return rows.length?[fine(coverageLabels[mode]+'（'+rows.length+'）',coverageRows(rows))]:[]
     })):null,
+   h('section',{style:box},h('h3',null,'记忆健康'),resourceMessage(memoryResource,'记忆状态'),memory?h('div',null,
+    paragraph('统一编排：'+(memory.managed?'已接管普通聊天':'未接管普通聊天，当前为降级状态')),
+    paragraph('模型请求观察器：'+(memory.streamReady?'已接入':'未接入')),
+    paragraph('有效事件 '+memory.events+' 条 · 待补入 '+memory.pendingHandoffs+' 条'),
+    paragraph('待补入是资料衔接，不是消息重发队列。'),paragraph('每轮记忆块上限：'+memory.budget+' 字符'),
+    memory.lastError?h('p',{role:'alert'},'最近记录错误：'+memory.lastError):paragraph('最近记录错误：接口未报告错误'),
+    h('h4',null,'来源接口就绪状态'),memory.providers?h('div',null,...[['vault','聊天原文库'],['memory','精选记忆'],['impression','人物关系'],['image','图片理解']].map(([key,label])=>paragraph(label+'：'+(memory.providers[key]?'已就绪':'未就绪')))):paragraph('接口未提供来源就绪状态。'),
+    h('h4',null,'存储'),memory.storage?h('div',null,paragraph('行动库：'+bytesLabel(memory.storage.lifeBytes)+' · WAL：'+bytesLabel(memory.storage.walBytes)),paragraph('可用磁盘空间：'+bytesLabel(memory.storage.freeBytes)),memory.storage.lowSpace?h('p',{role:'alert'},'服务器磁盘空间不足，请扩容或清理无关文件；不会自动删除历史原文。'):null):paragraph('存储占用：当前接口未提供。')):null,
+    state?.schedules?.length?fine('统一调度已登记的到期检查（'+state.schedules.length+'项）',
+     paragraph('到期检查不等于工具已执行；实际结果见最近经历。'),
+     h('ul',{className:'lc-list'},...state.schedules.map(s=>h('li',{key:s.module+':'+s.id},h('strong',null,s.label),meta(({waiting:'待首次检查',checking:'检查中',checked:'已检查','check-failed':'检查失败'}[s.status]||'状态未知')+(s.checkedAt?' · '+dateLabel(s.checkedAt):'')))))):null,
+    !coverage?paragraph('入口覆盖清单：当前接口未提供，不能据此判断每个后台入口均已接入。'):null),
    h('section',{style:box},h('h3',null,'承诺与任务'),paragraph('口头承诺不等于工具已启动；下方按实际持久请求或已确认表达显示状态。'),
     ...tasks.map(t=>h('div',{key:t.id,style:{padding:'12px 0',borderBottom:'1px solid #8884'}},h('strong',null,statusLabel(t.status)),paragraph(t.goal||'未提供任务目标'),t.message?paragraph(t.message):null,paragraph('任务ID：'+t.id+' · '+(t.chatId||'未指定聊天')),paragraph('记于 '+dateLabel(t.at)),t.dueAt?paragraph('计划时间：'+dateLabel(t.dueAt)):null,t.updatedAt?paragraph('更新于 '+dateLabel(t.updatedAt)):null)),
     !tasks.length?paragraph('接口未返回当前任务 / 承诺记录；不代表没有未完成事项。'):null,

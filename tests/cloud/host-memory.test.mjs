@@ -21,6 +21,7 @@ import {createPrivateJournal,journalDate} from '../../modules/autonomy/lib/priva
 import purposeDefinition from '../../modules/purpose/index.mjs'
 import speakupDefinition from '../../modules/speakup/index.mjs'
 import qzoneSocial from '../../modules/qzone-social/index.mjs'
+import night from '../../modules/night/index.mjs'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -116,6 +117,34 @@ if(!source) {
   assert.equal(h.routes.get('/candidates')({headers:{host:'localhost'}}).items[0].receipt,'1')
   await hub.pushToSession(chat,[{type:'text',text:'好啊，接着聊。'}],chat.userId)
   assert.match(JSON.stringify(turns[0].messages),/纸风车的话题要接着聊吗/)
+ })
+
+ for(const revoke of [false,true])test('installed hub: wake greeting '+(revoke?'stops at the last outbound guard after owner changes':'is confirmed exactly once on the native transport'),async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'wake-greeting-'))
+  let clock=new Date(2026,10,24,12,0).getTime()
+  t.mock.method(Date,'now',()=>clock)
+  const {h,dispatched}=makeHost(t,{sdk,now:()=>clock,afterSendFilter:revoke?async f=>{f.cfg.ownerQQ='10009'}:undefined})
+  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0,maxPerDay:5}
+  h.cfg.ext.night={enabled:true,morningGreeting:true,dreamAutoEnabled:false,latestSleepTime:'invalid',nightFatigue:'',noonFatigue:''}
+  h.modules['life-core']=h.core
+  h.api.core.modules={status:()=>[{id:'night',running:'user'}]}
+  const asks=[]
+  const {askModel}=await import(pathToFileURL(path.join(source,'core/llm.js')))
+  const entry=h.modules.night=await night.setup({...h.api,id:'night',settings:()=>h.cfg.ext.night,command(){},later(){},
+   ask:o=>askModel({llm:{
+    resolveModelInfo:async()=>({}),async *stream(opt){
+     asks.push(opt)
+     yield* await h.stream(opt,[{type:'text-delta',text:'我刚醒啦。'},{type:'finish',reason:{kind:'stop'}}])
+    }
+   }},{...o,model:{provider:'fixture',model:'fixture'}})})
+  Object.assign(entry.service.state,{mode:'asleep',sleepAt:clock-3600000,wakeAt:clock+60000,sleepKind:'night'})
+  clock+=60000;await h.timers.get('长夜作息心跳')();await h.timers.get('统一后台调度')()
+  clock+=60000;await h.timers.get('统一后台调度')()
+  assert.equal(asks.length,1)
+  assert.equal(dispatched.length,revoke?0:1)
+  const [row]=h.routes.get('/candidates')({headers:{host:'localhost'}}).items
+  assert.equal(row.status,revoke?'not-sent':'sent')
+  assert.equal(row.receipt,revoke?null:'1')
  })
 
  for(const withdraw of [false,true])test('installed hub: purpose candidate '+(withdraw?'honors a forget after an async outbound filter':'persists a native QQ receipt'),async t=>{

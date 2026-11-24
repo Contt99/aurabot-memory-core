@@ -10,7 +10,7 @@ import { dirname } from 'node:path'
 import * as energy from './energy.mjs'
 import * as stages from './stages.mjs'
 import { createWaker } from './wake.mjs'
-import { ownerPrivateChat } from './privacy.mjs'
+import { currentOwner, ownerPrivateChat } from './privacy.mjs'
 
 export const AWAKE = 'awake'
 export const ASLEEP = 'asleep'
@@ -30,11 +30,13 @@ const defaultState = () => ({
   fatigueTurns: 0,
   fatigueEntered: 0,
   dreamCount: 0,
+  dreamAttemptAt: 0,
   dreamSkip: false,
   pendingChats: [],
   wokeFrom: null,
   morningDreamId: '',
   hintWakeAt: 0,
+  wakeNotice: null,
   hintChats: [],
   dreamHintUses: 0,
   lastSleepWindow: [],
@@ -88,8 +90,10 @@ export class NightService {
       const tmp = `${this.file}.tmp`
       writeFileSync(tmp, JSON.stringify(this.state, null, 2), 'utf8')
       renameSync(tmp, this.file)
+      return true
     } catch (error) {
       this.log.warn('保存作息状态失败：' + (error?.message || error))
+      return false
     }
   }
 
@@ -323,12 +327,14 @@ export class NightService {
     const now = Date.now()
     s.mode = ASLEEP
     s.sleepAt = now
+    s.wakeNotice = null
     s.wakeAt = energy.nextWakeTime(cfg, now, { kind })
     s.reason = reason
     s.sleepKind = kind || 'night'
     s.enterWakingAt = 0
     s.pendingChats = []
     s.dreamCount = 0
+    s.dreamAttemptAt = 0
     s.dreamSkip = false
     s.wokeFrom = null
     s.morningDreamId = ''
@@ -379,6 +385,8 @@ export class NightService {
     s.fatigueEntered = 0
     s.morningDreamId = morning?.id || ''
     s.hintWakeAt = wokeAt
+    const owner = currentOwner(this.api)
+    s.wakeNotice = reason === 'natural' && cfg.morningGreeting && owner ? { at: wokeAt, owner } : null
     s.hintChats = []
     s.dreamHintUses = 0
     this.waker.resetAll()

@@ -132,23 +132,15 @@ test('owner replacement immediately changes prompt authorization', async (t) => 
   assert.ok(!f.service.promptHint(ownerChat).includes(SECRET))
   assert.doesNotMatch(f.service.promptHint(otherChat), /SYNTHETIC_GLOBAL_DREAM_BODY/)
 })
-test('natural morning greeting uses current owner scope without automatically injecting a dream', async (t) => {
+test('an old core cannot cause a legacy direct morning send', async (t) => {
   const core={contextManaged:()=>true,buildContext:o=>({id:'s',text:'SAFE',...o}),assertContextCurrent:()=>true,validateDraft:()=>({ok:true}),runWithContext:(_s,fn)=>fn()}
   const f = await fixture(t, { settings: { morningGreeting: true }, core, ask: () => '早上好' })
   f.service.tick = async () => ['wake_natural']
   f.service.state.morningDreamId = 'dream-fixture'
   await f.heartbeats[0]()
-  assert.deepEqual(f.sends, [{ chatId: 'private:10001', text: '早上好' }])
-  assert.doesNotMatch(f.asks[0].text, /SYNTHETIC_GLOBAL_DREAM_BODY/)
-})
-test('morning greeting cancels in-flight send after owner changes', async (t) => {
-  const core={contextManaged:()=>true,buildContext:o=>({id:'s',text:'SAFE',...o}),assertContextCurrent:()=>true,validateDraft:()=>({ok:true}),runWithContext:(_s,fn)=>fn()}
-  const f = await fixture(t, { settings: { morningGreeting: true }, core, ask: (_args, cfg) => { cfg.ownerQQ = '90009'; return SECRET } })
-  f.service.tick = async () => ['wake_natural']
-  f.service.state.morningDreamId = 'dream-fixture'
-  await f.heartbeats[0]()
-  assert.equal(f.sends.length, 0)
-  assert.equal(f.asks.length, 1)
+  await f.lifeSchedules()[0].run()
+  assert.equal(f.sends.length,0)
+  assert.equal(f.asks.length,0)
 })
 test('malformed owner cannot create a dream-bearing destination', async (t) => {
   const f = await fixture(t, { settings: { morningGreeting: true } })
