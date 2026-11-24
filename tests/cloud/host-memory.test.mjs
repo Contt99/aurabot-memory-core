@@ -28,6 +28,7 @@ import { createBiliApi, bindApi as bindBiliTransport } from '../../modules/bili/
 import { bindApi as bindBiliShots } from '../../modules/bili/lib/bili/shots.js'
 import { bindApi as bindBiliVision } from '../../modules/bili/lib/bili/vision.js'
 import { createDanmaku, bindApi as bindBiliDanmaku } from '../../modules/bili/lib/modules/bili/danmaku.js'
+import rss from '../../modules/rss-reader/index.mjs'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
 const source=process.env.AURABOT_HOST_SRC
@@ -378,6 +379,27 @@ if(!source) {
   await modules.sync()
   assert.equal(life.ownsSchedule('market-weather','poll'),false)
   assert.equal((await life.execute(tool,{city:'苏州'})).status,'unavailable')
+ })
+
+ test('installed host: scheduled RSS receipt is private and the carrier never implies a QQ post',async t=>{
+  process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'rss-pool-'))
+  let clock=Date.now()
+  t.mock.method(Date,'now',()=>clock)
+  const {h,dispatched}=makeHost(t,{sdk,now:()=>clock})
+  h.modules['life-core']=h.core
+  h.api.core.modules={status:()=>[{id:'rss-reader',running:'user'}]}
+  h.cfg.ext['rss-reader']={enabled:true,carrier:'policy',dailyMax:1,minScore:0,fetchMinutes:15,feeds:'https://feed.example/rss?token=synthetic'}
+  const body=new TextEncoder().encode('<rss><channel><title>私人频道</title><item><title>风车专栏</title><description>订阅独有的风车摘要</description><guid>fixture</guid></item></channel></rss>').buffer
+  const reader=h.modules['rss-reader']=rss.setup({...h.api,id:'rss-reader',settings:()=>h.cfg.ext['rss-reader'],
+   __rssTestHooks:{fetch:async()=>({ok:true,arrayBuffer:async()=>body})}})
+  assert.ok(h.core.ownsSchedule('rss-reader','fetch-tick'))
+  clock+=300000;await h.timers.get('统一后台调度')()
+  assert.match(reader.materials({chatId:'private:10001'})[0]?.text,/订阅独有的风车摘要/)
+  assert.deepEqual(reader.materials({chatId:'private:10003'}),[])
+  assert.match(h.core.buildContext({chatId:'private:10001',purpose:'chat',query:'风车摘要'}).text,/订阅独有的风车摘要/)
+  assert.doesNotMatch(h.core.buildContext({chatId:'private:10003',purpose:'chat',query:'风车摘要'}).text,/订阅独有的风车摘要/)
+  assert.deepEqual(dispatched,[])
+  assert.equal(h.core.proactiveState().count,0)
  })
 
  test('current QQ attachment identity admits a scoped quote ahead of nearby speech',async t=>{

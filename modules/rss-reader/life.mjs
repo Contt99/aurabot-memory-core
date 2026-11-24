@@ -7,6 +7,11 @@ export function createLifeAdapter(api) {
   }
   return {
     available: () => Boolean(core()?.propose),
+    managed:()=>typeof core()?.performEvidence==='function'&&typeof core()?.poolRssMaterials==='function',
+    observe:(run,meta)=>core()?.performEvidence?.({module:api.id,action:'feed-read',evidenceType:'rss-summary',public:false,...meta},run),
+    pool:spec=>core()?.poolRssMaterials?.(spec)??[],
+    latest:chatId=>core()?.latestRssMaterials?.(chatId)??[],
+    count:(all=false)=>core()?.countRssMaterials?.(all)??0,
     perform(action, run, meta = {}) {
       const c = core()
       if (c?.perform) return c.perform({ module: api.id, action, evidenceType: 'provider', public: false, ...meta }, run)

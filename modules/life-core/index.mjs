@@ -19,8 +19,9 @@ import {actionCoverage} from './lib/coverage.mjs'
 import {createQzonePlatform} from './lib/qzone-platform.mjs'
 import {createBiliPlatform} from './lib/bili-platform.mjs'
 import {createBiliDelivery,isBiliQQJob} from './lib/bili-delivery.mjs'
+import {createRssPool} from './lib/rss-pool.mjs'
 
-const VERSION='0.2.0-local.17'
+const VERSION='0.2.0-local.18'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -71,6 +72,7 @@ export default {
   const inputsOf=r=>[...(r.meta.sourceIds||[]),...(r.meta.evidenceType==='qq-ack'&&r.result?.messageId?[ackSource(r.meta.chatId,r.result.messageId)]:[])]
   function actionCurrent(r,seen=new Set()) {
    if(!r||r.deletedAt||!continuity.sourceCurrent(r.id)||r.meta.correctedAt)return false
+   if(r.meta.module==='rss-reader'&&['feed-read','rss-material'].includes(r.meta.action)&&!rssPool.current(r))return false
    if(seen.has(r.id))return true
    seen.add(r.id)
    return inputsOf(r).every(id=>{if(!continuity.sourceCurrent(id))return false;const source=ledger.get(id);return !source||actionCurrent(source,seen)})
@@ -371,6 +373,7 @@ export default {
   const qzonePlatform=createQzonePlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const biliPlatform=createBiliPlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const biliDelivery=createBiliDelivery({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,context,canTarget:canTouch})
+  const rssPool=createRssPool({api,cfg,active,enabled,now,ledger,actionCurrent,record:recordOutcome})
   const managementGuard=req=>{
    try {
     const host=String(req?.headers?.host||''),hostname=new URL('http://'+host).hostname
@@ -409,6 +412,7 @@ export default {
    qzoneInteractionHistory:qzonePlatform.history,
    runBiliInteraction:biliPlatform.run,countBiliInteractions:biliPlatform.tally,biliInteractionHistory:()=>[...biliPlatform.history(),...biliDelivery.history()],
    queueBiliDelivery:biliDelivery.queue,
+   poolRssMaterials:rssPool.pool,latestRssMaterials:rssPool.latest,countRssMaterials:rssPool.count,
    lastContactAckAt,supportsContactJob:(module,job)=>isContactJob(module,job,'contact'),
    candidateStatus:spec=>!disposed?candidates.byKey(spec)?.status:undefined,ownsSchedule:dispatcher.owns,queryExperiences,diarySources,assertSourcesCurrent,assertNarrationSupported,forgetPerson,onForget,recordOutcome,proactiveState,recall,experienceDetail,experiencesCurrent,...continuity,runDetached:fn=>context.exit(fn),diagnostic:telemetry.record,forgetRevision:scope=>Number(ledger.kv('image-forget-scopes',{})[scope])||0,forgetRevisionAt:scope=>Number(ledger.kv('image-forget-at',{})[scope])||0}
  }

@@ -1,8 +1,8 @@
 {
   "id": "rss-reader",
   "name": "自主上网",
-  "version": "1.0.0-life.3",
-  "description": "定时读 RSS 订阅源，把有意思的条目交给主动发言决策（她自己决定要不要跟主人聊）",
+  "version": "1.0.0-life.4",
+  "description": "定时读取 RSS，把挑中的订阅摘要保存为主人私聊可用的素材",
   "category": "platform",
   "tags": [
     "RSS",

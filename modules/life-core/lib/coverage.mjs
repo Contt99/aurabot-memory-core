@@ -49,7 +49,9 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  add('bili.danmaku','bili','B 站自动弹幕',{platform:typeof api.use('bili')?.lifeDanmaku?.write==='function',
   switchOn:bili?!!(bili.enabled&&bili.autoBrowse&&bili.danmakuEnabled&&bili.autoDanmaku):undefined,
   observed:true,window:sameDayWindow,note:'沿用弹幕独立额度，写前复核阅读来源和分P；以 B 站原生弹幕编号确认。'})
- add('rss.auto','rss-reader','RSS 定时阅读／转发',{clock:'fetch-tick',switchOn:rss.enabled===true,note:rss.carrier==='pool'?'当前设为只进素材池。':'提议后由原入口决定是否转发，仍未使用持久发送候选。'})
+ const rssPool=typeof api.use('rss-reader')?.lifeRss?.sourceCurrent==='function'
+ add('rss.auto','rss-reader','RSS 定时阅读与私人素材',{clock:'fetch-tick',platform:rssPool,switchOn:rss.enabled===true,
+  note:rssPool?'读取回执进入时间线；选中的摘要只给主人使用，不独立发 QQ。指定 0 条时只读取。':'仍只接管到期检查，未知是否具备持久素材接口。'})
  const spaceSocial=typeof api.use('qzone-social')?.lifePlatform?.canWrite==='function'
  add('qzone-social.auto','qzone-social','空间定时互动',{clock:'interact-tick',platform:spaceSocial,switchOn:config.qzoneSocial?.enabled,window:sameDayWindow,
   note:spaceSocial?'点赞以网关确认为准，评论和回复核对新编号；占用单独的空间互动配额。':'未发现统一空间出口。'})

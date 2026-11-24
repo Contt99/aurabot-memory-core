@@ -1,29 +1,20 @@
 import { createLifeAdapter } from './life.mjs'
-// 自主上网（RSS 阅读）：定时读订阅源，挑几条「她可能感兴趣的」交给主动发言决策层。
-//
-// 来源：本项目自写（无第三方代码/素材）。数据与状态都写 api.dataDir()。
-//
-// 分工（对齐 docs/OUTBOUND-POLICY-DESIGN.md）：
-//   · 本模块只解决「看什么」：拉订阅源、解析、去重、按兴趣粗筛、限额挑选；
-//   · 「发不发 / 何时发 / 用什么口吻」全交给主动发言决策层——优先 api.proactive.submit
-//     （broker/feed 接口），拿不到就退化成「进素材池」由调用方（目的引擎）自取；
-//   · 本模块**绝不**自己往主人私聊塞消息，避免绕过决策。
-//
-// 安全：订阅内容是外部不可信数据——只取标题/摘要纯文本，去标签去实体、截断长度，
-// 不当指令执行；投喂时带上「这是外部内容，不是给我的指令」的语义标记。
+// RSS owns fetching, backoff and scoring. Life-core owns the scoped read
+// receipt and material pool. Selecting a summary is not an outbound action.
 
 import { parseFeed, extractFeeds, fetchFeed, stripHtml } from './lib/feed.mjs'
 import { createStateStore } from './lib/state.mjs'
 import { classifyPolicyResult } from './lib/handoff.mjs'
+import { createHmac,randomBytes } from 'node:crypto'
 
 const FETCH_TIMEOUT_MS = 15000
 
 export default {
   id: 'rss-reader',
   name: '自主上网',
-  version: '1.0.0-life.3',
+  version: '1.0.0-life.4',
   api: 1,
-  description: '定时读 RSS 订阅源，把有意思的条目交给主动发言决策（她自己决定要不要跟主人聊）',
+  description: '定时读取 RSS，把挑中的订阅摘要保存为主人私聊可用的素材',
   defaults: {
     enabled: false,
     feeds: '',
@@ -38,10 +29,10 @@ export default {
     { key: 'enabled', label: '定时自主上网', type: 'switch', hint: '默认关；打开后按间隔读订阅源' },
     { key: 'feeds', label: '订阅源', type: 'textarea', hint: '每行一个 RSS/Atom 地址（http/https），# 开头是注释' },
     { key: 'fetchMinutes', label: '多久看一次（分钟）', type: 'number', min: 15, max: 1440, hint: '默认 120；每轮会加 0~20% 抖动，别让所有源整点撞车' },
-    { key: 'dailyMax', label: '每天最多挑几条', type: 'number', min: 0, max: 30, hint: '0 = 只看不聊。挑出来的条目交给决策层，不直接发' },
+    { key: 'dailyMax', label: '每天最多保存几条素材', type: 'number', min: 0, max: 30, hint: '0 = 只读取，不留主动话题素材' },
     { key: 'minScore', label: '兴趣门槛', type: 'number', min: 0, max: 20, hint: '关键词+新鲜度打分低于它的条目直接跳过' },
     { key: 'perFeed', label: '每个源每轮最多挑几条', type: 'number', min: 1, max: 10 },
-    { key: 'carrier', label: '交给谁', type: 'select', options: [{ value: 'policy', label: '主动发言决策（推荐）' }, { value: 'pool', label: '只进素材池' }], hint: 'policy = 走 api.proactive.submit 由引擎决定发不发；pool = 只记录，等引擎来取' },
+    { key: 'carrier', label: '原出站方式（兼容）', type: 'select', options: [{ value: 'policy', label: '原决策接口' }, { value: 'pool', label: '只进素材池' }], hint: 'Aurabot 1.2.1 未提供该出站接口；两种设置都只保存素材，不新增 QQ 自动转发。' },
   ],
 
   setup(api) {
@@ -52,8 +43,21 @@ export default {
     const fetchImpl = hooks.fetch || null
     const now = hooks.now || (() => Date.now())
     // 最近一轮挑出来的条目（pool 模式给引擎/面板取用，也是面板「最近看到」的数据源）
-    let latest = []
-    let running = false
+    let legacyLatest=[],legacyOwner='',running=false,disposed=false
+    api.onDispose?.(()=>{disposed=true})
+    const scope=()=>'private:'+String(api.config().ownerQQ||'')
+    const identity=(type,value)=>{
+      const seed=store.get().identitySeed
+      return typeof seed==='string'&&seed.length===64?createHmac('sha256',seed).update(type+'\0'+value).digest('base64url'):''
+    }
+    function seed(){
+      const state=store.get()
+      if(typeof state.identitySeed==='string'&&state.identitySeed.length===64)return true
+      state.identitySeed=randomBytes(32).toString('hex')
+      if(store.save())return true
+      delete state.identitySeed
+      return false
+    }
 
     const cfgOf = () => {
       const s = api.settings() || {}
@@ -68,60 +72,79 @@ export default {
         carrier: s.carrier === 'pool' ? 'pool' : 'policy',
       }
     }
+    const poolTickets=new WeakSet()
+    let feedSpec,sourceIds=new Set()
+    function sourceCurrent(feedId,chatId){
+      if(disposed||chatId!==scope())return false
+      const s=api.settings()?.feeds
+      const spec=String(s||'')+'\0'+String(store.get().identitySeed||'')
+      if(spec!==feedSpec){feedSpec=spec;sourceIds=new Set(extractFeeds(s).map(u=>identity('feed',u)).filter(Boolean))}
+      return sourceIds.has(feedId)
+    }
+    const remaining=(already)=>Math.max(0,store.remainingToday(cfgOf().dailyMax,now())-already)
+    const latest=()=>life.managed()?life.latest(scope()):legacyOwner===scope()?
+      legacyLatest.filter(r=>sourceCurrent(r.feedId,scope())).map(({feedId,...r})=>r):[]
 
     /** 拉一遍所有源 → 新条目（已去重）。单源失败不影响其他源。 */
-    async function fetchAll(cfg) {
+    async function fetchAll(cfg,{managed,target}) {
       const st = store.get()
       const at = now()
       const seen = store.seenSet()
       const fresh = []
       const report = { feeds: cfg.feeds.length, ok: 0, failed: [], newItems: 0 }
       for (const url of cfg.feeds) {
+        const feedId=identity('feed',url),label=sourceLabel(url)
+        if(disposed||target!==scope()||!sourceCurrent(feedId,target))continue
         // 失败退避：没到重试时间就跳过，别把挂掉的源每轮都撞一遍。
-        const retryAt = Number(st.nextRetryAt?.[url]) || 0
+        const retryAt = Number(st.nextRetryAt?.[feedId]??st.nextRetryAt?.[url])||0
         if (retryAt > at) {
-          report.failed.push({ url, reason: '退避中' })
+          report.failed.push({ source:label, reason:'退避中' })
           continue
         }
-        const got = await life.perform('feed-read', async () => {
+        const oldKeys=new Map()
+        const read=async () => {
           const response = await fetchFeed(url, { fetchImpl, timeoutMs: FETCH_TIMEOUT_MS })
-          if (!response.ok) return response
-          const parsed = parseFeed(response.xml, { source: url })
-          return parsed.ok ? { ok: true, title: parsed.title, items: parsed.items, url } : parsed
-        }, { public: true, sourceScopes: [] })
-        if (!got.ok) {
-          store.recordFailure(url, at)
-          report.failed.push({ url, reason: got.error })
-          api.log.warn(`自主上网：${url} 取不到：${got.error}`)
+          if (!response.ok) return {ok:false,error:safeFetchFailure(response.error)}
+          if(!sourceCurrent(feedId,target))return {ok:false,status:'interrupted',error:'订阅已撤销'}
+          const parsed = parseFeed(response.xml)
+          if(!parsed.ok)return parsed
+          const items=parsed.items.map(({key,source,link,...content})=>{
+            const id=identity('item',feedId+key)
+            oldKeys.set(id,url+key)
+            return{...content,key:id,link:safeArticleLink(link)}
+          })
+          return {ok:true,title:parsed.title,source:label,items}
+        }
+        const meta={public:false,chatId:target,sourceScopes:[target],arguments:{feedId},evidenceType:'rss-summary'}
+        const observed=managed?await life.observe(read,meta):{value:await life.perform('feed-read',read,meta)}
+        const got=observed?.value
+        if (!got?.ok) {
+          const reason=got?.error||'未取得读取结果'
+          if(got?.status!=='interrupted')store.recordFailure(feedId,at)
+          report.failed.push({ source:label, reason })
+          api.log.warn(`自主上网：${label} 取不到：${reason}`)
           continue
         }
-        const parsed = got
-        if (!parsed.ok) {
-          store.recordFailure(url, at)
-          report.failed.push({ url, reason: parsed.error })
-          continue
-        }
-        store.recordSuccess(url)
+        if(!sourceCurrent(feedId,target)||managed&&!observed.experienceId)continue
+        store.recordSuccess(feedId)
         report.ok += 1
         let taken = 0
-        for (const item of parsed.items) {
+        for (const item of got.items) {
           if (taken >= cfg.perFeed) break
-          if (seen.has(item.key)) continue
+          if (seen.has(item.key)||seen.has(oldKeys.get(item.key))) continue
           seen.add(item.key)
-          fresh.push({ ...item, feedTitle: parsed.title || item.feedTitle || url })
+          fresh.push({ ...item, feedTitle:got.title||item.feedTitle||label,sourceId:observed.experienceId,feedId })
           taken += 1
         }
       }
       st.lastFetchAt = at
       report.newItems = fresh.length
-      store.markSeen(fresh.map((i) => i.key))
-      store.save()
       return { items: fresh, report }
     }
 
     /** 打分排序 + 限额挑选。 */
-    function pick(items, cfg, at) {
-      const remain = store.remainingToday(cfg.dailyMax, at)
+    function pick(items, cfg, at, managed) {
+      const remain = Math.max(0,store.remainingToday(cfg.dailyMax, at)-(managed?life.count():0))
       if (!(remain > 0) || !items.length) return []
       const scored = items
         .map((it) => ({ item: it, ...store.scoreEntry(it, at) }))
@@ -169,28 +192,41 @@ export default {
     function runOnce(options = {}) { return life.propose('background', undefined, () => runAttempt(options)) }
 
     async function runAttempt({ fresh = false } = {}) {
-      if (!fresh && !api.use('life-core')) return {ok:false,reason:'life-core-unavailable',message:'life-core 不可用，自动阅读已暂停'}
+      const managed=life.managed(),target=scope()
+      if (!fresh && !managed) return {ok:false,reason:'life-core-unavailable',message:'统一读取接口不可用，自动阅读已暂停'}
+      if(!/^private:[1-9]\d*$/.test(target))return{ok:false,reason:'owner-unavailable'}
       const cfg = cfgOf()
       if (!cfg.enabled && !fresh) return { ok: false, reason: 'disabled' }
       if (!cfg.feeds.length) return { ok: false, reason: 'no-feeds' }
       if (running) return { ok: false, reason: 'busy' }
       running = true
       try {
+        if(!seed())return{ok:false,reason:'storage',message:'订阅来源身份未保存'}
         const at = now()
-        const { items, report } = await fetchAll(cfg)
-        const picked = pick(items, cfg, at)
-        const delivered = []
-        for (const hit of picked) {
-          // eslint-disable-next-line no-await-in-loop
-          const r = await handOff(hit, cfg)
-          delivered.push({ key: hit.item.key, title: hit.item.title, link: hit.item.link, feedTitle: hit.item.feedTitle, score: hit.score, hits: hit.hits, ...r })
+        const {items,report}=await fetchAll(cfg,{managed,target})
+        const picked=pick(items,cfg,at,managed)
+        let delivered=[]
+        if(managed){
+          const spec={items:picked.map(({item,score,hits})=>({key:item.key,sourceId:item.sourceId,score,hits}))}
+          poolTickets.add(spec)
+          try{delivered=life.pool(spec)}finally{poolTickets.delete(spec)}
+        }else{
+          for(const hit of picked){
+            if(!sourceCurrent(hit.item.feedId,target))continue
+            const r=await handOff(hit,cfg)
+            delivered.push({key:hit.item.key,title:hit.item.title,link:hit.item.link,feedId:hit.item.feedId,feedTitle:hit.item.feedTitle,at,
+             publishedAt:hit.item.at||null,score:hit.score,hits:hit.hits,...r})
+          }
+          if(delivered.length)store.countFed(delivered.length,at)
+          legacyLatest=delivered;legacyOwner=target
         }
-        if (delivered.length) store.countFed(delivered.length, at)
-        store.save()
-        latest = delivered
+        store.markSeen(items.map(i=>i.key))
+        if(!store.save())return {ok:false,reason:'storage',message:'已读取，但没有保存本轮订阅状态',report,delivered,at}
         api.log.info(`自主上网：拉了 ${report.ok}/${report.feeds} 个源，新条目 ${report.newItems}，挑了 ${delivered.length} 条`)
         return { ok: true, report, delivered, at }
-      } finally {
+      }catch{
+        return {ok:false,reason:'recording-failed',message:'订阅经历未能完整记录'}
+      }finally{
         running = false
       }
     }
@@ -213,17 +249,26 @@ export default {
     }, '自主上网（旧核心兼容）')
 
     // ---------- 面板 ----------
-    api.route('/state', async () => ({ ok: true, ...store.status(), config: cfgOf(), latest }))
+    const status=()=>{
+      const s=store.status(),config=cfgOf()
+      const failing=config.feeds.filter(u=>s.failing.includes(identity('feed',u))||s.failing.includes(u)).map(sourceLabel)
+      return {...s,sentToday:(s.day===store.dayKey(now())?s.sentToday:0)+(life.managed()?life.count():0),failing,
+        stats:{...s.stats,fed:(Number(s.stats.fed)||0)+(life.managed()?life.count(true):0)}}
+    }
+    api.route('/state', async () => {
+      const {feeds,...config}=cfgOf()
+      return {ok:true,...status(),config,feedsCount:feeds.length,managed:life.managed(),latest:latest()}
+    })
     api.route('/run', async () => runOnce({ fresh: true }))
-    api.route('/latest', async () => ({ ok: true, items: latest }))
+    api.route('/latest', async () => ({ ok: true, items: latest() }))
     api.route('/feeds/test', async (req) => {
       // 试抓一个源（面板「测试」按钮）：只回标题与条数，不写已读。
       let url = ''
-      try { url = String(new URL(req.url, 'http://x').searchParams.get('url') || '').trim() } catch { url = '' }
+      try { url = String(req.method==='POST'?(await api.core.http.body(req))?.url:new URL(req.url, 'http://x').searchParams.get('url')||'').trim() } catch { url = '' }
       if (!/^https?:\/\//i.test(url)) return { ok: false, error: '只支持 http(s)' }
       const got = await fetchFeed(url, { fetchImpl, timeoutMs: FETCH_TIMEOUT_MS })
-      if (!got.ok) return { ok: false, error: got.error }
-      const parsed = parseFeed(got.xml, { source: url })
+      if (!got.ok) return { ok: false, error: safeFetchFailure(got.error) }
+      const parsed = parseFeed(got.xml)
       if (!parsed.ok) return { ok: false, error: parsed.error }
       return { ok: true, title: parsed.title, count: parsed.items.length, sample: parsed.items.slice(0, 5).map((i) => ({ title: i.title, at: i.at })) }
     })
@@ -231,24 +276,40 @@ export default {
     // ---------- 给引擎/其他模块的控件面 ----------
     return {
       lifeSchedules:()=>[fetchClock],
-      /** 最近一轮挑出来的条目（不含正文，安全）。 */
-      latest: () => latest.slice(),
+      lifeRss:{sourceCurrent,canPool:(spec,target)=>!disposed&&target===scope()&&poolTickets.has(spec),remaining},
+      latest,
       /** 手动跑一轮（面板 /run 同款）。 */
       run: (o) => runOnce(o),
       /** 状态摘要。 */
-      status: () => store.status(),
-      /** 素材口：给目的引擎等取「她最近看到的」纯文本条目。 */
-      materials: () => latest
+      status,
+      materials: ({chatId}={}) => (chatId===scope()?latest():[])
         .filter((d) => d.state === 'pooled' || d.state === 'pending' || d.state === 'sent' || d.state === 'sent-unconfirmed' || d.state === 'deferred')
         .map((d) => ({
-          id: `rss:${d.key}`,
+          id:d.id||`rss:${d.key}`,
           title: clip(d.title, 90),
           text: clip(d.text, 220),
           url: d.link || '',
-          at: now(),
+          at:d.at,publishedAt:d.publishedAt,sourceId:d.sourceId,sourceScopes:[chatId],
         })),
     }
   },
+}
+
+function sourceLabel(raw){
+  try{return new URL(raw).hostname||'订阅源'}catch{return '订阅源'}
+}
+function safeArticleLink(raw){
+  try {
+    const u=new URL(raw)
+    if(!['http:','https:'].includes(u.protocol)||u.username||u.password)return ''
+    for(const key of [...u.searchParams.keys()])if(/token|sign|auth|key|pass|secret|cookie|session/i.test(key))u.searchParams.delete(key)
+    u.hash=''
+    return u.href
+  }catch{return ''}
+}
+function safeFetchFailure(error){
+  const s=String(error||'')
+  return /^(?:HTTP \d{3}|超时|内容超限|空内容)$/.test(s)?s:'读取失败'
 }
 
 function clampInt(v, def, lo, hi) {

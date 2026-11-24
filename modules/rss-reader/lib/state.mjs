@@ -6,7 +6,7 @@
 //   · 发不发、何时发、什么口吻全交给主动发言决策层（目的引擎 / 出站策略），本模块不自己发私聊；
 //   · 已读账本按条目去重键推进，同一件事不会反复喂。
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export const STATE_VERSION = 1
@@ -58,7 +58,9 @@ export function createStateStore(file) {
   function save() {
     try {
       mkdirSync(dirname(file), { recursive: true })
-      writeFileSync(file, JSON.stringify(load(), null, 2))
+      const tmp=file+'.tmp'
+      writeFileSync(tmp, JSON.stringify(load(), null, 2),{mode:0o600})
+      renameSync(tmp,file)
       return true
     } catch {
       return false // 落盘失败不影响本次运行（内存态仍在）
@@ -100,10 +102,10 @@ export function createStateStore(file) {
       s.seen = [...seen].slice(-MAX_SEEN)
       return s
     },
-    /** 今日额度还剩多少（dailyMax=0 视为不限，返回 Infinity）。 */
+    /** 0 只读，不挑主动素材。 */
     remainingToday(dailyMax, at = Date.now()) {
       const s = ensureDay(at)
-      if (!(Number(dailyMax) > 0)) return Infinity
+      if (!(Number(dailyMax) > 0)) return 0
       return Math.max(0, Number(dailyMax) - Number(s.sentToday || 0))
     },
     /** 记一次投喂（不是「发出去」——投喂给引擎也算占用当日额度，避免一口气塞满素材池）。 */
@@ -132,6 +134,7 @@ export function createStateStore(file) {
       const s = load()
       s.failures[url] = 0
       s.nextRetryAt[url] = 0
+      s.stats.fetched=(Number(s.stats.fetched)||0)+1
       return s
     },
     /**

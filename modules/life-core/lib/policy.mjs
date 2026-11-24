@@ -10,6 +10,7 @@ export function allowedSource(row, cfg, purpose, chatId = '') {
   const m = row.meta || {}
   if (m.actor && m.actor !== 'bot') return false
   if (row.deletedAt || m.correctedAt || m.kind === 'reflection' || m.action === 'private-diary') return false
+  if (m.module === 'rss-reader' && m.action === 'feed-read') return false
   const scopes = [...new Set([...(m.sourceScopes || []), ...(m.chatId ? [m.chatId] : [])])]
   if (scopes.some(s => !/^(group|private):\d+$/.test(s))) return false
   if (purpose === 'chat') return scopes.every(s => s === chatId) && (m.public === true || scopes.length > 0)
