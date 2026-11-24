@@ -1,0 +1,588 @@
+<!doctype html>
+<!-- Aurabot 桌宠渲染页（模板/生成物）：透明无边框、气泡、拖拽 + 甩抛（physics.js）、webm 动画池。 -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: "Microsoft YaHei", sans-serif; user-select: none; }
+  /* 舞台：动画 / 静态形象都在这里，整块可拖拽（拖拽不用 -webkit-app-region，那样会吞掉指针事件，
+     JS 拖拽才能采到轨迹算甩抛初速，见 physics.js）。
+     高度 240：素材真实规格是 640×360（16:9），人物画在画面中下部约 222×268 的透明框里；
+     渲染页按人物包围盒放大裁切（见脚本 detectCharBox/applyStageCrop），让人物填满 240×240 舞台。 */
+  #stage {
+    position: absolute; left: 20px; bottom: 16px; width: 240px; height: 240px;
+    cursor: grab; touch-action: none;
+  }
+  #stage.dragging { cursor: grabbing; }
+  /* 静态形象（没有任何动画素材时的兜底） */
+  #pet {
+    position: absolute; right: 24px; bottom: 8px; width: 96px; height: 96px;
+    border-radius: 50%; background: rgba(60, 170, 220, .85);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 46px; transition: transform .05s ease-out;
+    transform-origin: 50% 100%;
+  }
+  #pet.mood-very-happy { transform: scale(1.12) rotate(-6deg); }
+  #pet.mood-happy { transform: scale(1.05); }
+  #pet.mood-neutral { transform: none; }
+  #pet.mood-low { transform: scale(.94); filter: saturate(.7); }
+  #pet.mood-sad { transform: scale(.88) rotate(4deg); filter: saturate(.4) brightness(.9); }
+  /* webm 动画层（P1）：素材就绪时盖住静态形象。默认按 240 宽渲染（640×360 素材 → 135 高），
+     首帧后由 applyStageCrop 放大平移，让人物填满舞台（行内 width/height/left/bottom 会覆盖这里） */
+  #anim { position: absolute; left: 0; bottom: 0; width: 240px; display: none;
+    transform-origin: 50% 100%; /* 原来只挂在 .squashing 上，2026-11-07 挪成常态：hold 微捏/落地挤压共用同一原点 */
+    transition: transform .05s ease-out; }
+  #anim.squashing { transform-origin: 50% 100%; }
+  /* 按住微捏（hold-squash，2026-11-07 新增）：pointerdown 起人物被捏扁（下压 50%、横鼓 8%；
+     少爷实测反馈：要扁一半、按下和恢复都要在 ~50ms 内完成——调过两轮：
+     .94/1.03+.16s → .88/1.06+.09s → 现在 .5/1.08+.05s），
+     松手（pointerup/pointercancel）即移除恢复。优先级关系：__squash（落地/捏捏）的 rAF 动画写
+     **内联 transform**，内联永远盖过类 → 动画期间以动画为准，动画结束清内联后本类自然生效，
+     所以按住时被甩出去再落地，挤压照常播、播完回到微捏——不用改 __squash。
+     放在 mood 系列之后（同特异性，后者胜出）：被捏的手感优先于心情形变。 */
+  #pet.hold-squash, #anim.hold-squash { transform: scale(1.08, .5); }
+  /* 气泡：锚在宠物头顶（人物裁切后头顶≈舞台上沿，即窗口底往上 16+240=256px），向上生长、中心对齐。
+     窗口高随内容伸缩：气泡收起 264，弹出时主进程按气泡实高向上长（上限 430）。 */
+  #bubble {
+    position: absolute; left: 20px; bottom: 268px; width: 240px; box-sizing: border-box;
+    background: rgba(255, 255, 255, .97); border: 1px solid #bcd9ea; border-radius: 12px;
+    padding: 9px 12px; font-size: 12.5px; line-height: 1.55; color: #234;
+    box-shadow: 0 6px 18px rgba(30, 80, 120, .22); display: none; cursor: default;
+    word-break: break-word; transform-origin: 50% 100%;
+  }
+  #bubble.show { display: block; animation: bubbleIn .14s ease-out; }
+  @keyframes bubbleIn { from { opacity: 0; transform: translateY(5px) scale(.97); } to { opacity: 1; transform: none; } }
+  #bubble::after { /* 指向宠物头顶的小尾巴 */
+    content: ''; position: absolute; left: 50%; bottom: -5px; width: 10px; height: 10px;
+    background: rgba(255, 255, 255, .97); border-right: 1px solid #bcd9ea; border-bottom: 1px solid #bcd9ea;
+    transform: translateX(-50%) rotate(45deg);
+  }
+  #bubble .tag { display: inline-block; font-size: 10px; color: #2a86c6; margin-bottom: 3px; }
+  /* 长文本最多 6 行：窗口高 430，气泡区只有 ~154px，再高会顶出窗口被裁掉 */
+  #bubbleText { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+  /* 大字模式（2026-11-07，余额气泡）：数字要看清，字号 17px、行数降到 4——字号变大后 4 行
+     的像素高度与原 6 行 12.5px 相当，不会把窗口顶爆（refitWindow 照常量实高再上报）。 */
+  #bubble.big { font-size: 17px; }
+  #bubble.big #bubbleText { -webkit-line-clamp: 4; }
+</style>
+</head>
+<body>
+  <div id="bubble"><div class="tag" id="bubbleTag">主动来找你</div><div id="bubbleText"></div></div>
+  <div id="stage">
+    <!-- 静态形象的**兜底**：只有素材表为空 / 全部素材加载失败时才出现（见 stopVideo）。
+         正常情况下静止时显示的是「待机动画的末帧」= 鲸鱼娘本人，不是这个 emoji。
+         初始先藏起来，免得素材表到达前的几百毫秒里闪一下蓝色圆圈。 -->
+    <div id="pet" class="mood-neutral" style="display:none">🐳</div>
+    <video id="anim" autoplay muted playsinline></video>
+  </div>
+<script src="physics.js"></script>
+<script>
+  const bubble = document.getElementById('bubble')
+  const bubbleTag = document.getElementById('bubbleTag')
+  const bubbleText = document.getElementById('bubbleText')
+  const pet = document.getElementById('pet')
+  const stage = document.getElementById('stage')
+  const video = document.getElementById('anim')
+  const P = window.PetPhysics
+
+  // ---------- 动画节奏倍率（/config 的 animRate，0.5~2，缺省 1；2026-11-07 参数化契约）----------
+  // 只管渲染端的节拍：落地挤压时长、idle 轮播间隔都按它缩放（值越大节奏越快）。
+  // 物理（重力/弹力）归主进程，不经这里；服务端没下发时保持 1，照常能跑。
+  let animRate = 1
+  window.__setAnimRate = (r) => {
+    const v = Number(r)
+    if (Number.isFinite(v) && v > 0) animRate = Math.min(2, Math.max(0.5, v))
+  }
+
+  // ---------- 素材裁边（修「桌宠上方空白区域过大」）----------
+  // 实测：素材真实规格是 **640×360（16:9）**，人物只画在画面中下部约 222×268 的框里，
+  // 四周全透明（早先注释写「1:1 方形 240×240」是错的，导致舞台/窗口按 240 高留白）。
+  // 做法：拿到首帧后扫一遍像素求人物包围盒，再把 <video> 放大平移，让人物刚好填满舞台——
+  // 底边贴舞台底（脚踩地面）、水平居中。舞台仍是 240×240，拖拽/物理/命中都不用改。
+  // 39 段动画包围盒几乎一致（y 63~330），所以一次性裁切安全；换包时重算。
+  let cropDone = false
+  function detectCharBox() {
+    try {
+      const vw = video.videoWidth, vh = video.videoHeight
+      if (!vw || !vh || video.readyState < 2) return null
+      const cv = document.createElement('canvas')
+      cv.width = vw; cv.height = vh
+      const ctx = cv.getContext('2d', { willReadFrequently: true })
+      ctx.drawImage(video, 0, 0, vw, vh)
+      const d = ctx.getImageData(0, 0, vw, vh).data
+      let x0 = vw, y0 = vh, x1 = -1, y1 = -1
+      for (let y = 0; y < vh; y++) {
+        for (let x = 0; x < vw; x++) {
+          const i = (y * vw + x) * 4
+          // 透明区正常 alpha=0；个别平台 canvas 拿不到 alpha 会退化成纯黑，两种都当背景
+          if (d[i + 3] > 8 && d[i] + d[i + 1] + d[i + 2] > 24) {
+            if (x < x0) x0 = x
+            if (x > x1) x1 = x
+            if (y < y0) y0 = y
+            if (y > y1) y1 = y
+          }
+        }
+      }
+      if (x1 < 0) return null
+      return { x0, y0, w: x1 - x0 + 1, h: y1 - y0 + 1, vw, vh }
+    } catch { return null } // 画布被污染等：不裁，保持原样（宁可空白也别出错）
+  }
+  function applyStageCrop() {
+    if (cropDone) return
+    const bb = detectCharBox()
+    if (!bb) return
+    const STAGE_W = 240, STAGE_H = 240 // 与 CSS #stage 一致
+    const k = Math.min(STAGE_H / bb.h, STAGE_W / bb.w) // 人物填满舞台高的缩放（本来就宽就按宽收）
+    if (k <= (240 / bb.vw) * 1.08) { cropDone = true; return } // 素材本来就满格：别白折腾
+    video.style.width = (bb.vw * k) + 'px'
+    video.style.height = (bb.vh * k) + 'px'
+    video.style.left = (STAGE_W / 2 - (bb.x0 + bb.w / 2) * k) + 'px'
+    video.style.bottom = (-(bb.vh - (bb.y0 + bb.h)) * k) + 'px' // 人物底边贴舞台底
+    cropDone = true
+  }
+  function resetStageCrop() {
+    cropDone = false
+    video.style.width = ''
+    video.style.height = ''
+    video.style.left = ''
+    video.style.bottom = ''
+  }
+  video.addEventListener('loadeddata', applyStageCrop)
+
+
+  // ---------- 形象包（P1/P4）：动画池 + 权重 + 物理参数；缺素材回静态形象 ----------
+  let packAnims = {}   // 动画名 → 带 token 的素材地址（主进程给）
+  let pools = { idle: [], speak: [], click: [] }
+  let weights = {}
+  let physicsParams = null
+  let workMap = {}     // 干活状态 → 动画 id（服务端按命名约定/包配置解析好）
+  window.__setPack = (p) => {
+    packAnims = p && p.anims ? p.anims : {}
+    resetStageCrop() // 换包：上一份素材的裁切量不能套到新素材上，等首帧重新量
+    coolDown = {} // 主进程重推素材表（重连/换包）：冷却全部清零，从干净状态开始
+    pools = (p && p.pools) || { idle: [], speak: [], click: [] }
+    weights = (p && p.weights) || {}
+    physicsParams = (p && p.physics) || null
+    workMap = (p && p.workStatus) || {}
+    if (!hasAnims()) stopVideo()
+    else if (!currentAnim) playStill() // 首次拿到素材表：先摆一个待机立绘（别露 emoji）
+    scheduleIdle()
+  }
+  const hasAnims = () => Object.keys(packAnims).length > 0
+
+  // ---------- 动画播放（权重随机，播完回静态/接 idle；出错/缺素材回静态形象，不报错） ----------
+  // currentKind：'idle' | 'speak' | 'click' | 'menu'，'' = 没在播。
+  // 历史 bug：点播播完靠 scheduleIdle 接力，但它只在 !currentAnim 时才起 idle，
+  // 而 currentAnim 播完并不清空 → 点一次菜单动画就永远停在最后一帧。
+  // 现在的规矩：**播完一律走 afterAnim**——autoIdle 开着才接 idle，否则回静态立绘。
+  // （以前是「播完直接接 playIdle，idle 首尾相接」，等于桌宠自己在轮播动画，会和 AI 行为动作抢台。）
+  let currentAnim = ''
+  let currentKind = ''
+  // 自动轮播开关（2026-10-30 关掉）：以前 playIdle 首尾相接、永不停，AI 行为动作播到一半
+  // 就被 idle 接力切走，看起来像「动作没执行」。现在默认**不自动播**，只在
+  //   ① AI 行为动作点播（playAnimByName / __playIdleOnce）
+  //   ② 说话气泡（speak 池）
+  //   ③ 用户点击（click 池）
+  // 时播一段，播完回静态立绘。要恢复老行为：window.__setAutoIdle(true)。
+  let autoIdle = false
+  // 素材故障冷却（修「不定时变鲸鱼」）：加载连续失败只临时跳过 5 分钟，不再永久摘除——
+  // DSH 重启窗口期、端口漂移、GPU 解码 hiccup 都是暂时性的，摘除了就永远播不回来。
+  let coolDown = {}   // 动画名 → 冷却到期时间戳；到期后 pickFrom 自动恢复可选
+  let failStreak = 0  // 连续「起播即失败」次数：服务器全挂时避免紧密重试循环
+  const COOL_MS = 5 * 60_000
+  const FAIL_STREAK_MAX = 3
+  function pickFrom(poolName) {
+    const now = Date.now()
+    const pool = (pools[poolName] || []).filter((n) => packAnims[n] && !(coolDown[n] && now < coolDown[n]))
+    if (!pool.length) return ''
+    const w = pool.map((n) => Math.max(0, Number(weights[poolName]) || 1))
+    const total = w.reduce((a, b) => a + b, 0)
+    if (!(total > 0)) return pool[Math.floor(Math.random() * pool.length)]
+    let r = Math.random() * total
+    for (let i = 0; i < pool.length; i++) { r -= w[i]; if (r <= 0) return pool[i] }
+    return pool[pool.length - 1]
+  }
+  function stopVideo() {
+    video.pause(); video.removeAttribute('src'); video.style.display = 'none'
+    delete video.dataset.anim
+    pet.style.display = 'flex'
+    currentAnim = ''
+    currentKind = ''
+  }
+  /** 一段动画播完之后去哪：autoIdle 开着接下一段 idle，否则**定格成静态立绘**。
+   *  2026-10-30 修：以前这里 `stopVideo()` 会藏掉 video、露出 #pet 那个 🐳 emoji 圆圈，
+   *  看起来像「桌宠变成了一个蓝色圆图标」。素材包里没有 png 立绘，所以静态形象的正确做法是
+   *  让待机动画停在自己的最后一帧 —— 浏览器会保留这一帧画面，就是鲸鱼娘本人。
+   *  emoji 只在「素材表为空 / 全部素材加载失败」时兜底（stopVideo 仍保留那条路）。 */
+  function afterAnim() {
+    if (autoIdle) { playIdle(); return }
+    if (isIdleFrame(currentAnim)) { currentAnim = ''; currentKind = 'still'; return } // 本来就在播待机：直接停在末帧
+    playStill()
+  }
+  /** 待机帧：判断当前这段是不是待机池里的（是就不用换段，原地定格最自然）。 */
+  function isIdleFrame(name) {
+    return Boolean(name) && (pools.idle || []).includes(name) && video.style.display !== 'none'
+  }
+  /** 摆静态立绘：播一段待机动画，播完停在末帧（不循环、不接下一段）。 */
+  function playStill() {
+    const name = pickFrom('idle')
+    if (!name) { stopVideo(); return } // 待机池全在冷却 / 没有 idle 素材：退回 emoji 兜底
+    // kind 用 'idle'：这样播放中**单击还能打断**（`__playClick` 只放行 idle），
+    // 播完再标成 'still' 表示「现在是定格立绘、没在播」。
+    playAnim(name, () => { currentAnim = ''; currentKind = 'still' }, 'idle')
+  }
+  /** 播一段动画。onEnd 缺省 = 播完走 afterAnim。
+   *  kind 只用于「谁可以打断谁」：单击可以打断 idle，说话/点播播放中不被打断。 */
+  function playAnim(name, onEnd, kind) {
+    const url = packAnims[name]
+    if (!url) return false // 没素材：回落静态形象（验收：animations.json 缺失不报错）
+    currentAnim = name
+    currentKind = kind || 'idle'
+    pet.style.display = 'none'
+    video.classList.remove('squashing')
+    video.style.display = 'block'
+    video.onended = () => { const f = onEnd; onEnd = null; (f || afterAnim)() }
+    // 真正播起来了：清连续失败计数、清这段的重试标记与冷却（修「同段二次失败不再重试」）
+    video.onplaying = () => { failStreak = 0; delete video.dataset.retried; delete coolDown[name] }
+    // 素材 404 / 坏文件：先带随机串重试一次（插件刚重启、素材路由还没注册的情况很常见）。
+    // 仍然失败只进 5 分钟冷却（不永久摘除），并马上试同池其他段；连续 3 次起播即败才
+    // 回落静态形象等 scheduleIdle。播起来之后才出错（currentTime>0.2）≈ 解码/GPU hiccup，
+    // 素材本身没坏：不进冷却，直接换一段。
+    video.onerror = () => {
+      const decodeHiccup = Number(video.currentTime) > 0.2
+      if (!decodeHiccup && video.dataset.retried !== name) {
+        video.dataset.retried = name
+        video.src = url + (url.includes('?') ? '&' : '?') + 'retry=' + Date.now()
+        video.play().catch(() => {})
+        return
+      }
+      if (!decodeHiccup) coolDown[name] = Date.now() + COOL_MS
+      const kindNow = currentKind
+      stopVideo()
+      failStreak++
+      if (failStreak < FAIL_STREAK_MAX) {
+        const pool = (kindNow === 'speak' || kindNow === 'click') ? kindNow : 'idle'
+        const alt = pickFrom(pool)
+        if (alt) { playAnim(alt, null, pool); return }
+      }
+      scheduleIdle()
+    }
+    // 同一段重播（菜单又点了一次同一动作）：回开头即可，不必重新拉流
+    if (video.dataset.anim === name) { try { video.currentTime = 0 } catch {} }
+    else { video.dataset.anim = name; video.src = url }
+    // play() 在快速换源时会以 AbortError 拒绝，那不是素材坏了：交给 onerror 判断
+    video.play().catch(() => {})
+    return true
+  }
+  function playIdle() {
+    const name = pickFrom('idle')
+    if (!name) { stopVideo(); scheduleIdle(); return } // 全在冷却：鲸鱼兜底 + 定时重试（冷却到期自动复活）
+    playAnim(name, null, 'idle') // 播完走 afterAnim：autoIdle 才继续接，否则停在这一段末尾回静态
+  }
+  let idleTimer = null
+  // 动画节奏倍率：声明与 __setAnimRate 见文件开头（2026-11-07 参数化契约块），此处只消费——
+  // 1.0.15 曾在此重复 `let animRate` 引发 SyntaxError 整页挂掉（桌宠全透明不显示），已删。
+  function scheduleIdle() {
+    clearTimeout(idleTimer)
+    if (!autoIdle) return // 自动轮播关着：不排下一段（动作全交给 AI 行为 / 说话 / 点击）
+    if (!hasAnims()) return
+    const pace = Math.min(2, Math.max(0.5, Number(animRate) || 1)) // 坏值回落 1，与服务端口径一致
+    idleTimer = setTimeout(() => {
+      idleTimer = null
+      if (!currentAnim) playIdle() // 真没在播才起 idle；在播的那段结束后自己会接力
+    }, (6000 + Math.random() * 8000) / pace)
+  }
+  // 主进程/调试用：恢复自动轮播 / 单播一段 idle 池动画（AI 的 idle_anim 动作走这条）
+  // （__setAnimRate 的定义也在文件开头块里，1.0.15 曾在此重复定义，已删）
+  window.__setAutoIdle = (v) => { autoIdle = !!v; if (autoIdle && !currentAnim) playIdle(); else if (!autoIdle) scheduleIdle() }
+  window.__playIdleOnce = () => { const name = pickFrom('idle'); return name ? playAnim(name, null, 'idle') : false }
+
+  // ---------- 跑动动画（一移动就循环播「原地漂浮踏步」） ----------
+  // 主进程 moveWindowTo 在真正开始位移时 __startMoveAnim(id)，停下时 __stopMoveAnim()。
+  // id 由主进程按**右键菜单同源**的方式换算（动作 → 待机 → 原地漂浮踏步 = anim-021）。
+  // 为什么要循环：这段素材是「原地」踏步，播一次只有几秒，横跨屏幕要几十秒（50px/s），
+  // 不循环就会出现「走到一半站着不动、窗口还在慢慢飘」的诡异画面。
+  // 抢占规则：移动一发生就播，不等说话/点击动画播完——不然 50px/s 走 10 秒里前几秒
+  // 全被台词动画占着，看起来就像「移动时播了别的动作」。
+  let moveAnimId = ''
+  let moving = false
+  let moveTimer = null
+  function moveTick() {
+    clearTimeout(moveTimer); moveTimer = null
+    if (!moving) return
+    if (!moveAnimId || !packAnims[moveAnimId]) { moveTimer = setTimeout(moveTick, 400); return } // 素材表还没推下来 / 包里没这段：稍后再看
+    playAnim(moveAnimId, () => { moveTimer = setTimeout(moveTick, 0) }, 'move')
+  }
+  window.__startMoveAnim = (id) => {
+    if (id) moveAnimId = String(id)
+    if (moving) return true
+    moving = true
+    moveTick()
+    return true
+  }
+  window.__stopMoveAnim = () => {
+    if (!moving) return
+    moving = false
+    clearTimeout(moveTimer); moveTimer = null
+    if (currentAnim === moveAnimId) afterAnim() // 只在跑动动画还在播时才收：别把气泡动画打断
+  }
+
+  // ---------- 气泡（主动事件 / 碎碎念）：优先播点播 anim（P2），否则从 speak 池抽一段 ----------
+  let bubbleTimer = null
+  let bubbleRevision = 0
+  window.__bubble = (t, mood, secs, anim, playbackId, tag, emo, big) => {
+    ++bubbleRevision
+    bubbleText.textContent = t
+    bubbleTag.textContent = String(tag || '主动来找你')
+    bubble.classList.add('show')
+    // 大字模式（2026-11-07）：余额等「要看清数字」的气泡用（CSS #bubble.big，字号 17px、4 行截断）；
+    // 其余调用不传 big，行为不变。hide() 时一并移除，别让大字号漏给下一条普通气泡。
+    bubble.classList.toggle('big', big === true)
+    pet.className = 'mood-' + (mood || 'neutral')
+    // 情绪画像 → 气泡辉光：冷暖色随 valence（正=暖金 / 负=冷蓝），强弱随 arousal（幅度+亮度）。
+    // 没带画像（老插件/非目的回合）就清掉，回到默认描边。
+    if (emo && typeof emo === 'object' && Number.isFinite(Number(emo.arousal))) {
+      const val = Number.isFinite(Number(emo.valence)) ? Number(emo.valence) : 0
+      const glow = Math.max(0, Math.min(1, Number(emo.arousal)))
+      const hue = val >= 0 ? 45 : 205
+      bubble.style.boxShadow = `0 0 ${Math.round(8 + glow * 18)}px hsla(${hue},80%,60%,${(0.25 + glow * 0.35).toFixed(2)})`
+      bubble.style.borderColor = `hsla(${hue},70%,55%,${(0.35 + glow * 0.4).toFixed(2)})`
+    } else {
+      bubble.style.boxShadow = ''
+      bubble.style.borderColor = ''
+    }
+    clearTimeout(bubbleTimer)
+    bubbleTimer = setTimeout(hide, Math.max(6500, (secs || 8) * 1000))
+    // 气泡弹出：文本写入后布局要等一帧才稳定，rAF 后量实高再让窗口向上长
+    requestAnimationFrame(refitWindow)
+    // 起播动画：点播优先，其次 speak 池；点播 + 有回执号时把它带回给主进程（POST /playback）
+    const name = (anim && packAnims[anim]) ? anim : pickFrom('speak')
+    const played = (anim && playbackId && packAnims[anim]) ? { anim, playbackId } : null
+    if (name) playAnim(name, null, 'speak')
+    return played
+  }
+  // Wait for the fit IPC and a painted frame. Animation playback and simply
+  // writing textContent are not proof that the entire body was visible.
+  window.__confirmedBubble = async (id,t,mood,secs,tag) => {
+    if (document.visibilityState !== 'visible') return false
+    window.__bubble(t,mood,secs,'','',tag,null,false)
+    const revision=bubbleRevision
+    const deadline=performance.now()+450
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+    while (performance.now()<deadline && bubbleRevision===revision && document.visibilityState==='visible' &&
+           bubble.classList.contains('show') && bubbleText.textContent===t) {
+      if (bubbleText.scrollHeight>bubbleText.clientHeight || bubbleText.scrollWidth>bubbleText.clientWidth) return false
+      const b=bubbleText.getBoundingClientRect()
+      if (Number(getComputedStyle(bubble).opacity)>0 && b.width>0 && b.height>0 &&
+          b.left>=0 && b.top>=0 && b.right<=innerWidth && b.bottom<=innerHeight)
+        return id
+      await new Promise(resolve=>requestAnimationFrame(resolve))
+    }
+    return false
+  }
+  function hide() {
+    ++bubbleRevision
+    bubble.classList.remove('show')
+    bubble.classList.remove('big') // 大字模式只属于当次气泡，收起即还原
+    refitWindow() // 气泡收起：窗口缩回贴合宠物本体（见下方 refitWindow）
+  }
+  window.__hideBubble = hide
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide() })
+
+  // ---------- 窗口贴合内容（修「空白区域过大」）----------
+  // 窗口固定 430 高时，气泡区 ~166px 平时全透明却真占着屏幕（截图/共享/任务栏预览都露馅）。
+  // 规矩：气泡收起 → 上报 264（16 底距 + 240 素材 + 8 顶距）；气泡弹出 → 等一帧布局稳定后
+  // 量气泡实际高度再上报（264 + 12 缝 + 气泡高 + 8 顶距，上限 430）。主进程按倍率换算并钉住底边。
+  const REST_H = 16 + 240 + 8
+  const BUBBLE_MAX_H = 154 // 与 CSS 六行截断一致，防实测异常值顶爆上限（主进程还会再夹一次）
+  function refitWindow() {
+    const bh = bubble.classList.contains('show') ? Math.min(BUBBLE_MAX_H, bubble.offsetHeight) : 0
+    window.petBridge && window.petBridge.fitWindow(bh ? REST_H + 12 + bh + 8 : REST_H)
+  }
+
+  // ---------- 落地挤压（P3）：主进程甩抛落地回调 __squash(冲击速度) ----------
+  let squashToken = 0 // 单飞行：新的挤压直接接管旧的，避免多次回调叠出一堆并发的 rAF 循环
+  window.__squash = (impactSpeed) => {
+    const squash = P ? P.landingSquash(impactSpeed) : 0.55
+    const duration = P ? P.SQ_DURATION_MS / animRate : 220 / animRate // 节奏倍率：捏/落地都用同一基准
+    const target = video.style.display !== 'none' ? video : pet
+    const token = ++squashToken
+    target.classList.add('squashing')
+    const t0 = performance.now()
+    const tick = (now) => {
+      if (token !== squashToken) return // 被更新的挤压接管：这一条循环自己退出
+      const u = Math.min(1, (now - t0) / duration)
+      const scaleY = P ? P.squashScale(u, squash) : 1
+      const scaleX = 2 - scaleY // 体积守恒的横向鼓出
+      target.style.transform = `scale(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)})`
+      if (u < 1) requestAnimationFrame(tick)
+      else { target.style.transform = ''; target.classList.remove('squashing') }
+    }
+    requestAnimationFrame(tick)
+  }
+  window.__onThrowEnd = () => { scheduleIdle() }
+
+  // ---------- 单击互动 / 菜单点播：click 池随机 或 指名强制插播 ----------
+  window.__playClick = () => {
+    if (dragging) return false // 拖拽中不播
+    if (currentAnim && currentKind !== 'idle') return false // 说话/点播动画播放中不打断（idle 可以被打断）
+    clearTimeout(idleTimer)
+    const name = pickFrom('click')
+    return name ? playAnim(name, null, 'click') : false
+  }
+  // 右键「动作」子菜单点播：任意已知动画强制插播，播完接回 idle（绝不留在最后一帧）
+  window.__playAnim = (name) => {
+    if (!name || !packAnims[name]) return false
+    clearTimeout(idleTimer)
+    return playAnim(name, null, 'menu')
+  }
+  // 自检/调试用：当前在播什么、地址表里有多少段、几段在冷却（右键菜单不通时先看这个）
+  window.__playAnimInfo = () => ({ anim: currentAnim, kind: currentKind, count: Object.keys(packAnims).length, cooling: Object.keys(coolDown).length })
+
+  // ---------- 干活状态（思考/干活/等确认/完成/出错）：跟着 DSH 会话切动画 ----------
+  // 进行中的档位循环播同一段（思考就一直在思考），终态播一次就回 idle；状态没变不重播。
+  // 动画来源：包的 events.workStatus（或按 default 包的「工作状态-*」命名约定自动识别的 idle 映射）。
+  const WORK_ACTIVE = { thinking: 1, working: 1, waiting: 1, result: 1 }
+  let workState = ''
+  window.__setWork = (state, task) => {
+    const st = String(state || '')
+    workState = st
+    if (!st) { // 回空闲
+      if (currentKind === 'work') playIdle()
+      return true
+    }
+    const mapped = workMap[st] && packAnims[workMap[st]] ? workMap[st] : pickFrom('speak')
+    if (!mapped) return false
+    const active = Boolean(WORK_ACTIVE[st])
+    const loop = () => {
+      if (workState !== st) { playIdle(); return }
+      if (active) playAnim(mapped, loop, 'work')
+      else { workState = ''; playIdle() } // success/error：播一次，然后回 idle
+    }
+    clearTimeout(idleTimer)
+    return playAnim(mapped, loop, 'work')
+  }
+  window.__workInfo = () => ({ state: workState, anim: currentAnim, mapped: workMap })
+  // 右键「碎碎念」本地兜底：插件不可达/拒绝时，直接播一段说话动画 + 气泡
+  window.__whisper = (text) => window.__bubble(String(text || '……'), 'happy', 9, '', '', '碎碎念')
+
+  // ---------- 拖拽 + 甩抛（P3；2026-11-07 改主进程权威）----------
+  // 旧机制（已删）：渲染页拿 petBridge.screenInfo() 的窗口坐标加「指针屏幕坐标差值」自算窗口目标，
+  // 并在渲染页采轨迹 → pet:move/pet:throw。真实客户端里 forwarded-input 穿透窗 + setZoomFactor
+  // 会让这套自算坐标错位——这就是「拖拽偏移」的根因（纯 Electron 探针已验证：指针事件的屏幕坐标
+  // 与 screen.getCursorScreenPoint() 完全一致，DIP 1:1；错的是渲染页自己的几何链路）。
+  // 新机制：渲染页只发三个信号——dragStart() / dragMove()（rAF 节流的心跳，**不带坐标**）/
+  // dragEnd(isClick)。挪窗、轨迹采样、初速估算、甩抛积分全部在主进程（见 main.js pet:drag-*）。
+  // 保留的教训：高回报率鼠标下 pointermove 一秒几百上千次，必须按 rAF 合并再发 IPC。
+  let dragging = null // { start:{x,y}, moved, pinchTimer, pinched, holdEl }
+  /** 按住微捏的收尾：移除 .hold-squash（endDrag / pointercancel 共用）。 */
+  const releaseHold = () => {
+    if (dragging && dragging.holdEl) dragging.holdEl.classList.remove('hold-squash')
+  }
+  let dragKeepalive = null // 按住期间保活心跳句柄（见 pointerdown；pointermove 心跳只在移动时才有）
+  const PINCH_DELAY_MS = 450  // 捏：按住静止的触发时长（任务书默认值）
+  const PINCH_MOVE_PX = 8     // 捏：位移超过它（CSS px）视为拖动，取消捏
+  const stopKeepalive = () => { if (dragKeepalive) { clearInterval(dragKeepalive); dragKeepalive = null } }
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return
+    window.petBridge && window.petBridge.stopThrow() // 旧教训：中途按住必须先停飞行循环，否则松手不满足抛掷条件会挂半空（主进程 drag-start 里也会再停一次，双保险）
+    dragging = { start: { x: e.clientX, y: e.clientY }, moved: false, pinchTimer: null, pinched: false }
+    stage.classList.add('dragging')
+    try { stage.setPointerCapture(e.pointerId) } catch {}
+    window.petBridge && window.petBridge.dragStart()
+    // 按住微捏（hold）：按住的全程人物被轻轻捏扁（CSS 类 .hold-squash，见样式区注释），
+    // 松手/取消即恢复。纯 class 切换，无定时器无 rAF；拖拽中按住也生效（抓着她走=被捏着走），
+    // 松手甩抛时移除类、落地挤压照常由 __squash 接管。取元素口径与 __squash 一致。
+    // 【三个触感的关系】① 按住微捏：pointerdown 即生效、全程保持的轻微形变（scaleY .94）；
+    //  ② 450ms 捏捏：按住**不动**够久才触发的重一点挤压 + 气泡（下方 pinchTimer，一次按住最多一次）；
+    //  ③ 落地挤压：松手甩抛落地后主进程回调 __squash 播的冲击挤压（rAF 内联 transform，
+    //     优先级最高，动画期间盖过 ① 的类，结束清内联后 ① 若仍在按住会自然接回）。
+    const holdEl = video.style.display !== 'none' ? video : pet
+    dragging.holdEl = holdEl
+    holdEl.classList.add('hold-squash')
+    // 保活心跳（2026-11-07 复审必修补）：pointermove 心跳只在移动时才有，用户「按住不动」（捏着
+    // 不放/按住想放哪儿）超过主进程的丢失阈值会被误判成拖拽丢失而原地掉落。按住期间每 300ms 发
+    // 一次 dragMove 刷新 lastSeen；与 rAF 节流那条共存无害（drag-move 只是刷时间戳）。松手即清。
+    stopKeepalive()
+    dragKeepalive = setInterval(() => { window.petBridge && window.petBridge.dragMove() }, 300)
+    // 捏（pinch）：按住不动 ~450ms → 挤一下 + 气泡。一次按住最多触发一次；松手/拖动即取消。
+    // 只用一次 setTimeout，不起常驻定时器。
+    dragging.pinchTimer = setTimeout(() => {
+      if (!dragging || dragging.moved || dragging.pinched) return
+      dragging.pinched = true
+      window.__squash && window.__squash(300) // 轻捏：中等冲击档的挤压幅度
+      window.__bubble && window.__bubble('（被捏了…）', 'neutral', 5, '', '', '捏捏')
+    }, PINCH_DELAY_MS)
+  })
+  // pointermove 只做两件事：记录位移（区分单击/捏）+ 按 rAF 节流发心跳；坐标一个都不传。
+  let moveFlushQueued = false
+  const flushMove = () => {
+    moveFlushQueued = false
+    if (dragging) window.petBridge && window.petBridge.dragMove()
+  }
+  stage.addEventListener('pointermove', (e) => {
+    if (!dragging) return
+    if (Math.hypot(e.clientX - dragging.start.x, e.clientY - dragging.start.y) >= PINCH_MOVE_PX) {
+      dragging.moved = true
+      if (dragging.pinchTimer) { clearTimeout(dragging.pinchTimer); dragging.pinchTimer = null }
+    }
+    if (!moveFlushQueued) { moveFlushQueued = true; requestAnimationFrame(flushMove) }
+  })
+  const endDrag = (e) => {
+    if (!dragging) return
+    const d = dragging
+    if (d.pinchTimer) { clearTimeout(d.pinchTimer); d.pinchTimer = null }
+    stopKeepalive()
+    releaseHold() // 松手：解除按住微捏（甩抛/落地挤压随后由主进程 __squash 照常接管）
+    dragging = null
+    stage.classList.remove('dragging')
+    const isClick = Math.hypot(e.clientX - d.start.x, e.clientY - d.start.y) < 6
+    if (isClick) {
+      // 原地轻点：单击互动照旧；原地掉落由主进程 drag-end 统一处理（等价旧 drop()，受 releaseLand 门控）
+      window.__playClick && window.__playClick()
+      window.petBridge && window.petBridge.reportClick && window.petBridge.reportClick()
+    }
+    // 甩抛 / 温柔放下 / 原地掉落全在主进程按 DIP 轨迹决定；releaseLand 关 → 停在哪就在哪
+    window.petBridge && window.petBridge.dragEnd(isClick)
+  }
+  stage.addEventListener('pointerup', endDrag)
+  stage.addEventListener('pointercancel', () => {
+    if (!dragging) return
+    if (dragging.pinchTimer) { clearTimeout(dragging.pinchTimer); dragging.pinchTimer = null }
+    stopKeepalive()
+    releaseHold()
+    dragging = null
+    stage.classList.remove('dragging')
+    window.petBridge && window.petBridge.dragEnd(false) // 取消按普通松手收尾（主进程兜底原地掉落）
+  })
+
+  // ---------- 右键菜单（仿 dsh-pet）：整个窗口任意位置右键 → 主进程原生菜单 ----------
+  document.addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    window.petBridge && window.petBridge.showMenu()
+  })
+
+  // ---------- 鼠标穿透：窗口只有悬停在宠物/气泡上时才拦鼠标，其余透明区域放行点击 ----------
+  // 配合主进程 setIgnoreMouseEvents(true, {forward:true})：forward 让渲染页仍能收到 mousemove，
+  // 这里据此做命中检测，悬停在宠物/气泡上就恢复交互，离开再放行。
+  let hitState = null
+  function updateHit(x, y) {
+    const el = document.elementFromPoint(x, y)
+    const hit = !!(el && (stage.contains(el) || bubble.contains(el)))
+    if (hit !== hitState) { hitState = hit; window.petBridge && window.petBridge.setHit(hit) }
+  }
+  document.addEventListener('mousemove', (e) => {
+    if (dragging) return // 拖拽中保持可交互，避免窗口中途变穿透把拖拽弄丢
+    updateHit(e.clientX, e.clientY)
+  })
+
+  // ---------- 兜底：素材表迟迟没来（插件离线 / 端口未就绪）才露 emoji，别让窗口一直空着 ----------
+  // 正常情况下 __setPack 一到就 playStill()，这里只是「1.5 秒还没有任何素材」时的保命显示。
+  setTimeout(() => {
+    if (!hasAnims() && !currentAnim) pet.style.display = 'flex'
+  }, 1500)
+  // 开局先收一次窗口：窗口模板是 430 高，渲染页就绪后没有气泡就该缩到贴合宠物本体
+  refitWindow()
+</script>
+</body>
+</html>

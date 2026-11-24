@@ -275,8 +275,7 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
         log.warn?.('目的：桌宠气泡投递出错，结果不确定，不再重发：', error?.message)
         return 'failed'
       }
-      if (r && r.ok && r.via !== 'qq') hub.noteSaid?.(chatIdOf(getConfig()), text) // 气泡没法回，主人在 QQ 接话时她得知道说过什么
-      if (r && r.ok) return 'sent' // dispatch 内部竞态回落 QQ 时也已发出，调用方不能再发
+      if (r?.ok) return 'unconfirmed' // 原手工入口仍投递；仅入队不能当作已显示或已说过。
       if (r && r.reason === 'focus') return 'silent' // 专注模式开着：不发也不回落
       if (r && r.reason === 'pet-offline') return su.petFallbackToQQ ? 'qq' : 'silent' // 已确认尚未投递
       log.warn?.('目的：桌宠投递未确认成功，不再重发')
@@ -360,14 +359,17 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     const memo = parsePurposeMemo(raw)
     const text = cleanReply(raw, { warn: (message) => log.warn?.(`目的：${message}`) })
     let outcome
-    const ship=async({sendQQ}={})=>{
-      const where = friend ? 'qq' : await deliverByCarrier(text, picked.purpose.text, snapshot, () => { if ((hub.lastOwnerChatAt || 0) > lastInputAt) throw Error('目标已继续聊天，本轮不发送') }) // 桌宠气泡只给主人看
+    const ship=async({sendQQ,sendPet}={})=>{
+      const where = friend ? 'qq' : sendPet ? await sendPet(picked.purpose.text) :
+       await deliverByCarrier(text, picked.purpose.text, snapshot, () => { if ((hub.lastOwnerChatAt || 0) > lastInputAt) throw Error('目标已继续聊天，本轮不发送') })
       if (where === 'sent') {
         return 'sent' // dispatch 已推气泡或回落 QQ：正常结算次数与心情
       } else if (where === 'silent') {
         return 'silent' // carrier=pet 且关闭回落（或专注模式）：静默，不硬补
       } else if (where === 'failed') {
         return 'delivery-failed' // dispatch 结果不确定：不补发，避免重复
+      } else if(where==='unconfirmed'){
+        return 'delivery-unconfirmed'
       } else {
         try {
           if(sendQQ){

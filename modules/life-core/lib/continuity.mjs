@@ -54,6 +54,12 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
    const changes=ledger.changesPage(actionCursor,200)
    for(const r of changes) {
     if(r.deletedAt){store.invalidate([r.id]);continue}
+    if(r.meta.evidenceType==='pet-shown'){
+     if(r.status==='succeeded'&&r.meta.action==='bubble-shown'&&r.meta.chatId.startsWith('private:')&&r.result?.text)
+      store.putEvent({id:r.id,nativeKey:'pet:'+r.result.deliveryId,type:'utterance',chatId:r.meta.chatId,occurredAt:r.meta.occurredAt,
+       status:'confirmed',data:{text:r.result.text,who:'大肥鱼（桌宠气泡）',origin:'pet-renderer',sourceIds:r.meta.sourceIds||[]}})
+     continue
+    }
     if(r.meta.evidenceType==='qq-ack'||r.meta.evidenceType==='outbound-attempt')continue
     store.putEvent({id:r.id,nativeKey:'action:'+r.id,type:r.meta.kind==='reflection'?'reflection':'action',chatId:r.meta.chatId||'',occurredAt:Object.hasOwn(r.meta,'occurredAt')?Number(r.meta.occurredAt)||0:r.at,status:r.status,
      data:{actionId:r.id,module:r.meta.module,action:r.meta.action,startedAt:r.at,finishedAt:r.status==='running'?null:r.updatedAt,evidenceType:r.meta.evidenceType,sourceScopes:r.meta.sourceScopes||[],sourceIds:r.meta.sourceIds||[],origin:'action-ledger'}})
@@ -77,8 +83,9 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
  }
  const managed=(purpose='chat')=>purposes.has(purpose)&&!lastError&&active()&&streamReady&&preStepReady&&(!['chat','proactive'].includes(purpose)||typeof vault()?.timelineRecent==='function')
  const mediaTimelineManaged=info=>managed('chat')&&!(info?.chat?.chatId&&bound.getStore()?.chatId===info.chat.chatId)&&typeof api.use('image-familiar')?.prepareTimelineImages==='function'
+ const speechCurrent=e=>Boolean(e&&!e.invalidatedAt&&(e.data.origin!=='pet-renderer'||e.chatId==='private:'+String(cfg().ownerQQ)))
  function chatItem(e,r) {
-  if(!e||e.invalidatedAt)return null
+  if(!speechCurrent(e))return null
   const correction=e.status==='corrected'?store.corrections(e.id)[0]:null
   if(e.status==='corrected'&&!correction?.data.text)return null
   const v=e.data.vaultId
@@ -92,7 +99,7 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
   if(!managed('proactive')||!authorizedChat(cfg(),chatId))return null
   const recent=vault()?.timelineRecent?.({chatId,limit:12})||[]
   for(const row of recent)if(row.dir==='out')project(row)
-  const e=store.latestEvent(chatId,'utterance')
+  const e=store.latestEvent(chatId,'utterance',{excludeOrigin:'pet-renderer'})
   if(e?.status!=='confirmed'||!nativeAck(e.data.messageId)||!(e.occurredAt>0))return null
   const item=chatItem(e)
   const lastIncomingAt=Math.max(0,...recent.filter(r=>r.dir==='in').map(r=>Math.max(Number(r.observedAt)||0,Number(r.t)||0)))
@@ -127,6 +134,12 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
   if(['chat','proactive'].includes(purpose)) {
    const rows=vault()?.timelineRecent?.({chatId,limit:12,beforeAt:t})||[]
    const recent=rows.map(r=>chatItem(project(r),r)).filter(Boolean)
+   if(chatId==='private:'+String(cfg().ownerQQ)){
+    for(const e of store.recentPetSpeech(chatId,t)){
+     const item=chatItem(e)
+     if(item)recent.push(item)
+    }
+   }
    const pending=store.pending(chatId,sessionId).map(e=>chatItem(e)).filter(Boolean)
    const image=api.use('image-familiar')
    const observations=store.allEvents({chatId,type:'observation',limit:12}).filter(e=>e.data.evidenceType==='visual-interpretation'&&!e.data.uncertain&&e.data.sourceId&&image?.contextCurrent?.([e.data.sourceId],{chatId}))
@@ -211,7 +224,7 @@ export function createContinuity({api,ledger,cfg,active,recall,experiencesCurren
   for(const i of [...s.items||[],...s.externalSources||[]]) {
    for(const id of i.correctionSources||[])if(store.reason(id)||id.startsWith('vault:')&&!vault()?.timelineCurrent?.([id],{chatId:s.chatId}))throw Error('纠正证据已失效')
    if(i.refKind==='vault'&&!vault()?.timelineCurrent?.([i.id],{chatId:s.chatId}))throw Error('原文来源已忘记或权限变化')
-   if(i.refKind==='event') {const e=store.event(i.eventId||i.id);if(!e||e.invalidatedAt)throw Error('发言来源已失效')}
+   if(i.refKind==='event'&&!speechCurrent(store.event(i.eventId||i.id)))throw Error('发言来源已失效')
    if(i.refKind==='provider'&&!api.use(i.provider)?.contextCurrent?.(i.providerIds,{chatId:s.chatId}))throw Error('精选记忆或人物来源已改变')
    if(i.refKind==='visual'&&!api.use('image-familiar')?.contextCurrent?.([i.id],{chatId:s.chatId}))throw Error('图片理解已更新或忘记')
    if(i.refKind==='media'){

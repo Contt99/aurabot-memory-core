@@ -14,6 +14,7 @@ import {createRequire} from 'node:module'
 import {prepareImage} from '../../modules/image-familiar/lib/frames.mjs'
 import {createLifeAdapter as purposeAdapter} from '../../modules/purpose/life.mjs'
 import lifeDefinition from '../../modules/life-core/index.mjs'
+import petDefinition from '../../modules/pet/index.mjs'
 import tiebaDefinition from '../../modules/tieba-reader/index.mjs'
 import {bindApi as bindQzone,createQzone} from '../../modules/diary/lib/features/qzone.js'
 import {createLifeAdapter as diaryAdapter} from '../../modules/diary/life.mjs'
@@ -379,6 +380,40 @@ if(!source) {
   await modules.sync()
   assert.equal(life.ownsSchedule('market-weather','poll'),false)
   assert.equal((await life.execute(tool,{city:'苏州'})).status,'unavailable')
+ })
+
+ test('installed module host keeps pet receipt routes on the existing pet API prefix',async t=>{
+  const root=process.env.AURABOT_DATA_DIR=fs.mkdtempSync(path.join(scratch,'pet-receipt-'))
+  const {createModules}=await import(pathToFileURL(path.join(source,'core/modules.js')))
+  const cfg={ownerQQ:'10001',ext:{},modules:{}}
+  const http={query:req=>Object.fromEntries(new URL(req.url,'http://local').searchParams),
+   body:async req=>req.body,send:(res,status,value)=>Object.assign(res,{status,value})}
+  const logger={child(){return this},info(){},warn(){},error(){},debug(){}}
+  const modules=createModules({ctx:{on:()=>()=>{}},core:{http},getConfig:()=>cfg,setConfig:()=>{},logger,version:'1.2.1',
+   builtins:[{...petDefinition,setup:api=>petDefinition.setup({...api,__petTestHooks:{}})}]})
+  t.after(()=>modules.dispose())
+  await modules.boot()
+  const pet=modules.use('pet')
+  const token=fs.readFileSync(path.join(root,'modules-data','pet','host-token'),'utf8').trim()
+  async function call(pathname,query='',body){
+   const path='/aurabot/api'+pathname
+   const res={setHeader(){}}
+   await modules.handle(path,{url:path+query,method:body?'POST':'GET',body,socket:{remoteAddress:'127.0.0.1'},
+    headers:{host:'127.0.0.1:9494','x-pet-token':token,'content-type':'application/json'}},res)
+   assert.ok(res.value,'host module router handled '+pathname)
+   return res.value
+  }
+  const query='?client=screen&bubbleReceipt=1'
+  const init=await call('/events',query)
+  const delivery=pet.dispatchWithReceipt({id:'browser-demo',text:'今天看到流星了。',isCurrent:()=>true,expiresAt:Date.now()+3000})
+  const poll=await call('/events',query+'&since='+init.cursor)
+  assert.equal(poll.events[0].deliveryId,'browser-demo')
+  assert.equal(poll.events[0].text,undefined)
+  const payload={deliveryId:'browser-demo',client:'screen',bootId:init.bootId}
+  const grant=await call('/delivery/claim','',payload)
+  assert.equal(grant.message.text,'今天看到流星了。')
+  assert.equal((await call('/delivery/shown','',{...payload,claim:grant.claim})).ok,true)
+  assert.equal((await delivery).status,'shown')
  })
 
  test('installed host: scheduled RSS receipt is private and the carrier never implies a QQ post',async t=>{

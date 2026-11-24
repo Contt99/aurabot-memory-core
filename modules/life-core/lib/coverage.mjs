@@ -73,7 +73,13 @@ export function actionCoverage({api,config,schedules,candidateJob,observing,core
  }
  add('impression.auto','impression-card','印象卡片的主动微调',{
   switchOn:ext['impression-card']?.enabled!==false&&ext['impression-card']?.proactiveEnabled===true,note:'仍由印象卡模块检查；与被动查卡分开。'})
- add('pet.local','pet','桌宠气泡与内部回落',{switchOn:ext.purpose?.carrier==='pet'?true:undefined,note:'没有本地气泡接收的可追溯回执。'})
+ const pet=api.use('pet'),petReceipt=typeof pet?.dispatchWithReceipt==='function'
+ const petClients=petReceipt?pet.bubbleReceiptStatus?.()?.clients:undefined
+ add('pet.purpose','pet','目的引擎 · 桌宠文本气泡',{platform:petReceipt,requires:()=>candidateJob('purpose','contact'),
+  switchOn:ext.purpose?.enabled===true&&ext.purpose?.carrier==='pet',window:shared,
+  note:petReceipt?(Number.isInteger(petClients)?(petClients?'支持显示回执的在线客户端：'+petClients+'。':'暂无支持显示回执的在线客户端。'):'客户端回执能力未报告。')+
+   '仅客户端确认显示才记为说过；旧客户端入队不算显示，结果未知不补发。':'当前桌宠仅提供旧式投递，不能证明已显示。'})
+ add('pet.local','pet','桌宠自己的碎碎念与桌面行为',{note:'沿用原模块入口；动画回执不证明气泡文本已显示。'})
  if(su.nudge&&Number(su.idleMinutes??40)>=40)conflicts.push('追问只在最后一句问题发出后 15–40 分钟有效；共享空闲要求 '+Number(su.idleMinutes??40)+' 分钟，没有重叠。')
  if(su.enabled===true&&ext.purpose?.enabled===true&&!running.has('purpose'))conflicts.push('旧主动搭话被设置为让位给目的引擎，但目的引擎当前未加载；这两个定时入口都不会触发。')
  if(tieba.autoBrowse===true&&['Asia/Shanghai','Asia/Chongqing','PRC'].includes(tz)&&[tbFrom,tbTo,qFrom,qTo].every(x=>x!==null)&&

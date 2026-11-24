@@ -18,6 +18,7 @@
 | `memory` | Aurabot contributors（宿主上游） | 宿主内置模块的同 ID 分叉，见 [Aurabot MIT 许可](licenses/Aurabot-MIT.txt) |
 | `moodboard` | RookieApe-tao | MIT；保留模块内 `LICENSE` |
 | `night` | zcx1021 | MIT；保留模块内 `LICENSE` |
+| `pet` | RookieApe-tao | 市场版 1.0.18 的同 ID 分叉；保留 `LICENSE` 和 `THIRD-PARTY-NOTICES.md`，不分发 CC 动画素材 |
 | `purpose` | 未在清单声明 | MIT；保留模块内 `LICENSE` |
 | `qwen-tts` | mrnobodynan | MIT；保留模块内 `LICENSE` |
 | `qzone-social` | 未在清单声明 | MIT；保留模块内 `LICENSE` |
@@ -31,6 +32,7 @@
 
 - autonomy：[asyncxt/aurabot-mod-autonomy](https://github.com/asyncxt/aurabot-mod-autonomy)。
 - impression-card：[cdcp998/impression-card](https://github.com/cdcp998/impression-card)。
+- pet：[原模块](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)及其移植来源 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)；具体署名见[桌宠第三方通知](modules/pet/THIRD-PARTY-NOTICES.md)。
 - purpose：引擎移植自 [Mieksido/surfcore](https://github.com/Mieksido/surfcore)；[目的引擎通知](modules/purpose/THIRD-PARTY-NOTICES.md)包含从宿主上游核回的原始署名及 MIT 许可全文。
 - tieba-reader：见[打包依赖通知](modules/tieba-reader/THIRD-PARTY-NOTICES.md)。其中 boolbase 1.0.0 的包元数据声明 ISC；另附[上游许可证正文](licenses/boolbase-ISC.txt)（[来源](https://github.com/fb55/boolbase/blob/master/LICENSE)）。
 

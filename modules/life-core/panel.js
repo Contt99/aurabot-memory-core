@@ -16,14 +16,18 @@ const candidateName=c=>({space:'空间日记',journal:'私人日记','space-soci
   'night/wake-greeting':'自然醒后问候','bili/share':'分享 B 站视频','bili/shot':'发送 B 站截图'}[c.module+'/'+c.job]||c.module+' / '+c.job))
 const candidateLabel=c=>{
  const d=candidateTarget(c)
+ if(c.status==='shown')return '桌宠已显示'
  if(c.status==='saved')return c.reason==='forgotten'?'日记已忘记':'已保存到服务器'
  if(c.status==='sent')return d==='space'?'发布已确认':d==='space-social'||d==='bili'?'平台已确认':'发送已确认'
+ if(c.status==='sending'&&c.module==='purpose')return '等待送达回执'
  if(c.status==='sending')return ({space:'等待说说编号','space-social':'等待空间网关',bili:'等待 B 站回执',journal:'保存中',qq:'等待 QQ 回执'})[d]
  if(c.status==='not-sent')return ({space:'未发布','space-social':'未提交成功',bili:'未发送',journal:'未保存',qq:'未发送'})[d]
  return ({queued:'等待调度',expired:'已过期',skipped:'主动跳过'}[c.status]||statusLabel(c.status))
 }
 const candidateDetail=c=>{
  const d=candidateTarget(c),r=c.reason
+ if(c.status==='shown')return c.receipt?'桌宠显示回执 '+c.receipt:''
+ if(r==='pet-unconfirmed')return '桌宠未确认显示，不自动重发'
  if(d==='bili'){
   if(c.receipt)return c.job==='like'?'平台确认（点赞没有单独编号）':(c.job==='danmaku'?'B 站弹幕编号 ':'B 站评论编号 ')+c.receipt
   if(r==='missing-receipt'||r==='restarted')return '结果待平台确认，不自动重发'
@@ -202,10 +206,10 @@ function Panel(){
    meta([r.switchState==='off'?'设置关闭':'',r.window,r.checkMinutes?'每 '+r.checkMinutes+' 分钟检查':'',r.lastCheckAt?'上次检查 '+dateLabel(r.lastCheckAt):''].filter(Boolean).join(' · ')),
    r.note?paragraph(r.note):null)))
   return h('div',null,
-   h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('这里只显示经持久队列处理的行动。看回执可确认实际发布、发送或服务器保存。'),
+   h('section',{style:box},h('h3',null,'后台行动回执'),paragraph('查看实际发布、发送、桌宠显示或服务器保存的结果。这里只列经持久队列处理的行动。'),
     resourceMessage(candidateResource,'后台回执'),
     candidates?.length?h('ul',{className:'lc-list'},...candidates.map(c=>h('li',{key:c.id},
-     h('div',{style:flow},h('strong',null,candidateName(c)),pill(candidateLabel(c),c.status==='sent'||c.status==='saved'&&c.receipt?'live':undefined)),
+     h('div',{style:flow},h('strong',null,candidateName(c)),pill(candidateLabel(c),c.status==='sent'||c.status==='shown'||c.status==='saved'&&c.receipt?'live':undefined)),
      meta([dateLabel(c.updatedAt),candidateDetail(c)||(c.status==='queued'?'有效至 '+dateLabel(c.expiresAt):'')].filter(Boolean).join(' · ')),
      fine('查看行动来源',paragraph('目标：'+c.target),paragraph('候选ID：'+c.id),sourceLine(c.sourceIds,'关联经历'))))):candidates?empty('还没有通过核心排队的后台行动。'):null),
    coverage?h('section',{style:box},h('h3',null,'入口覆盖与时段'),

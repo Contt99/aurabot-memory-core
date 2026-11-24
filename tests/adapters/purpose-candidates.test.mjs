@@ -5,7 +5,7 @@ import {fixture} from './legacy-adapters-fixture.mjs'
 import definition from '../../modules/purpose/index.mjs'
 import {localDateKey} from '../../modules/purpose/lib/purpose/engine.js'
 
-function setup(t,{beforeAsk=()=>{},ack='88',friend=false}={}){
+function setup(t,{beforeAsk=()=>{},ack='88',friend=false,pet}={}){
  const store=fixture();t.after(store.close)
  const rows=[
   message(1,'今天好想一起看看流星雨？','in',friend?'private:10003':'private:10001'),
@@ -14,6 +14,7 @@ function setup(t,{beforeAsk=()=>{},ack='88',friend=false}={}){
  const h=harness(t,{rows})
  h.cfg.speakUp={awakeFrom:0,awakeTo:24,idleMinutes:0,minIntervalMinutes:1,maxIntervalMinutes:1,allow:friend?['10003']:[]}
  h.cfg.ext.purpose={enabled:true,minMaterials:0,initialDelayMinutes:1}
+ if(pet){h.cfg.ext.purpose.carrier='pet';h.modules.pet=pet}
  h.modules['life-core']=h.core
  h.api.core.mutes={muted:id=>friend&&id==='private:10001'}
  h.api.core.personas={current:()=> '喜欢看鲸鱼和流星雨。'}
@@ -55,6 +56,45 @@ test('purpose finds one eligible recipient then the core claims, accounts and ca
  assert.doesNotMatch(f.prompts[0],/不该进入对方上下文/)
  const next=f.core.buildContext({chatId:'private:10003',purpose:'chat',query:'你刚才说什么'})
  assert.match(next.text,/要一起看流星雨吗/)
+})
+
+test('an old desktop relay is not a shown bubble and must not fall back to QQ after accepting',async t=>{
+ let attempted
+ const f=setup(t,{pet:{online:()=>({online:true}),dispatch:async o=>{attempted=o;return {ok:true,via:'pet',message:{messageId:'queued-legacy'}}}}})
+ let noted=0
+ f.api.core.hub.noteSaid=()=>{noted++}
+ await f.purpose.tick();await f.tick()
+ assert.equal(attempted.noFallback,true)
+ assert.equal(f.replies.length,0)
+ assert.equal(noted,0)
+ assert.equal(f.recent()[0].status,'unknown')
+ assert.equal(f.recent()[0].reason,'pet-unconfirmed')
+ assert.doesNotMatch(f.core.buildContext({chatId:f.target,purpose:'chat',query:'你刚才说什么'}).text,/要一起看流星雨吗/)
+})
+
+test('a desktop renderer acknowledgement becomes real speech only in the owner chat',async t=>{
+ const f=setup(t,{pet:{online:()=>({online:true}),dispatchWithReceipt:async o=>{
+  assert.equal(o.isCurrent(),true)
+  return {ok:true,status:'shown',deliveryId:o.id,text:o.text,shownAt:Date.now()}
+ }}})
+ await f.purpose.tick();await f.tick()
+ assert.equal(f.replies.length,0)
+ assert.equal(f.recent()[0].status,'shown')
+ assert.match(f.recent()[0].receipt,/^pet:/)
+ assert.match(f.core.buildContext({chatId:f.target,purpose:'chat',query:'你刚才说什么'}).text,/桌宠气泡.*要一起看流星雨吗/)
+ assert.doesNotMatch(f.core.buildContext({chatId:'private:10003',purpose:'chat',query:'流星雨'}).text,/要一起看流星雨吗/)
+ assert.equal(f.core.latestConfirmedSpeech(f.target),null,'a desktop receipt is not a QQ message identity')
+ const ownerContext=f.core.buildContext({chatId:f.target,purpose:'chat',query:'你刚才说什么'})
+ f.cfg.ownerQQ='10004';f.cfg.allow.private.push('10001')
+ assert.throws(()=>f.core.assertContextCurrent(ownerContext),/发言来源/)
+ assert.doesNotMatch(f.core.buildContext({chatId:f.target,purpose:'chat',query:'流星雨'}).text,/要一起看流星雨吗/)
+})
+
+test('a definitively offline pet may fall back once through the gated QQ path',async t=>{
+ const f=setup(t,{pet:{online:()=>({online:true}),dispatchWithReceipt:async()=>({ok:false,reason:'pet-offline'})}})
+ await f.purpose.tick();await f.tick()
+ assert.equal(f.replies.length,1)
+ assert.equal(f.recent()[0].receipt,'88')
 })
 
 test('purpose withdrawal in the model wait stops delivery; a missing native ACK is never counted as sent',async t=>{

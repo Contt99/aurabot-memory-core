@@ -15,7 +15,7 @@ import {  createPurpose  } from './lib/purpose/module.js'
 export default {
   id: 'purpose',
   name: '目的引擎（实验）',
-  version: '1.0.0-life.6',
+  version: '1.0.0-life.7',
   description: '像人一样主动找主人搭话：攒素材 → 记观察 → 立目标假设 → 挑一个候选，到点了才来找你。默认关闭；与旧主动搭话共用共享门禁，不重复消耗额度。',
   tab: 'speakup',
   files: ['purpose/engine.js', 'purpose/module.js'],

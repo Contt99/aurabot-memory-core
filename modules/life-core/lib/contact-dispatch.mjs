@@ -6,12 +6,12 @@ export const isContactJob=(module,id,kind)=>kind==='contact'&&(
 // Ordinary manual delivery is unchanged. A scheduled contact gets a durable
 // gate at the existing host transport boundary, with native receipts observed
 // in the same execution context as its dispatch.
-export function createContactDispatch({candidates,now,active,disposed,sleeping,cfg,hub,continuity,jobFor,canTarget,permission,context}){
+export function createContactDispatch({candidates,now,active,disposed,sleeping,cfg,hub,pet,savePetSpeech,continuity,jobFor,canTarget,permission,context}){
  return async function run(row,job){
   const parent=context.getStore(),uid=row.target.slice(8),owner=String(cfg().ownerQQ)
   const lastPrivate=()=>Math.max(Number(hub().lastPrivateAt?.(uid))||0,uid===owner?Number(hub().lastOwnerChatAt)||0:0)
   const admittedAt=lastPrivate()
-  let transportEntered=false,blocked=false,snapshot,outcome='',receipt=''
+  let transportEntered=false,blocked=false,snapshot,outcome='',receipt='',petResult='',viaPet=false
   const allowed=(statuses)=>!disposed()&&active()&&!sleeping()&&canTarget(row.target)&&String(cfg().ownerQQ)===owner&&
    continuity.contextManaged('proactive')&&lastPrivate()<=admittedAt&&row.expiresAt>now()&&
    statuses.includes(candidates.get(row.id)?.status)&&jobFor(row.module,row.job)===job&&permission(job,row)===true
@@ -49,16 +49,55 @@ export function createContactDispatch({candidates,now,active,disposed,sleeping,c
      if(!disposed()&&nativeAck(id)&&candidates.ack(row.id,row.target,id))receipt=id
      return {ok:!!receipt,text:observed.get(receipt)||''}
     }
-    return effect({sendQQ})
+    const sendPet=async purpose=>{
+     const usePet=()=>row.module==='purpose'&&row.target==='private:'+owner&&cfg().ext?.purpose?.carrier==='pet'
+     if(!usePet())return 'qq'
+     const adapter=pet(),fallback=()=>cfg().ext?.purpose?.petFallbackToQQ!==false?'qq':'silent'
+     const shownText=String(text).trim().slice(0,600)
+     const isCurrent=()=>usePet()&&pet()===adapter&&allowed(['sending'])&&continuity.validateDraft(shownText,snapshot).ok
+     if(!isCurrent()){blocked=true;return 'failed'}
+     if(!adapter?.online?.()?.online)return fallback()
+     let r
+     try{
+      petResult='pet-unconfirmed'
+      const supports=typeof adapter.dispatchWithReceipt==='function'
+      let admitted=false
+      if(supports){
+       r=await continuity.runWithContext(snapshot,()=>adapter.dispatchWithReceipt({
+        id:row.id,text:shownText,purpose:String(purpose||'').slice(0,40),isCurrent:()=>admitted=isCurrent(),expiresAt:Math.min(row.expiresAt,now()+120_000)}))
+      }
+      if((!supports||r?.reason==='legacy-client')&&typeof adapter.dispatch==='function'){
+       if(!isCurrent()){petResult='';blocked=true;return 'failed'}
+       // The legacy adapter accepts a relay, but cannot prove local display or
+       // recheck after awaiting TTS. Keep its text bubble without claiming it.
+       r=await continuity.runWithContext(snapshot,()=>adapter.dispatch({text:shownText,purpose,noFallback:true,modality:'text'}))
+       if(r?.ok)return 'failed'
+      }
+      if(r?.reason==='pet-offline'){petResult='';return fallback()}
+      if(r?.reason==='focus'){petResult='';return 'silent'}
+      if(r?.reason==='withdrawn'){petResult='';blocked=true;return 'failed'}
+      if(!disposed()&&admitted&&r?.ok===true&&r.status==='shown'&&r.deliveryId===row.id&&r.text===shownText&&
+       Number.isFinite(r.shownAt)&&r.shownAt>=row.createdAt&&r.shownAt<=now()){
+       let preserve=false
+       try{preserve=String(cfg().ownerQQ)===owner&&continuity.assertContextCurrent(snapshot)}catch{}
+       if(savePetSpeech(row,r,preserve)){
+        receipt='pet:'+row.id;viaPet=true
+        return 'sent'
+       }
+      }
+     }catch{/* The relay or the display may already have happened. */}
+     return 'failed'
+    }
+    return effect({sendQQ,sendPet})
    })
    outcome=result?.outcome||''
   }catch{/* determine the outcome from the authoritative queue and receipts */}
-  if(receipt)return {ok:true,status:'sent',messageId:receipt,candidateId:row.id}
+  if(receipt)return viaPet?{ok:true,status:'shown',receipt,candidateId:row.id}:{ok:true,status:'sent',messageId:receipt,candidateId:row.id}
   if(disposed())return {ok:false,status:'interrupted',candidateId:row.id}
   const status=candidates.get(row.id)?.status
   if(status==='sending'){
    if(!transportEntered&&(blocked||outcome==='silent'))return finish('not-sent','source-or-permission')
-   return finish('unknown','missing-receipt')
+   return finish('unknown',petResult||'missing-receipt')
   }
   if(status==='running')return outcome==='silent'||outcome.startsWith('skipped-')
    ?finish('skipped','no-interest'):finish('not-sent','draft-rejected')

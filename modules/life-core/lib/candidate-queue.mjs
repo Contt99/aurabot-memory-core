@@ -81,7 +81,7 @@ export function createCandidateQueue(db,now){
     jobs.map(()=>'?').join(',')+") AND substr(target,1,?)=? AND status IN ("+statuses.map(()=>'?').join(',')+") AND createdAt>=?")
     .get(module,...jobs,prefix.length,prefix,...statuses,from).n,
   latestSentAt:(module,target)=>db.prepare("SELECT MAX(updatedAt) n FROM life_candidates WHERE module=? AND target=? AND status='sent'").get(module,target).n||0,
-  latestPrivateSentAt:target=>db.prepare("SELECT MAX(updatedAt) n FROM life_candidates WHERE target=? AND status='sent'").get(target).n||0,
+  latestPrivateSentAt:target=>db.prepare("SELECT MAX(updatedAt) n FROM life_candidates WHERE target=? AND status IN ('sent','shown')").get(target).n||0,
   recentFor:module=>db.prepare('SELECT * FROM life_candidates WHERE module=? ORDER BY createdAt DESC,rowid DESC LIMIT 30').all(module).map(parse),
   recent:()=>db.prepare('SELECT * FROM life_candidates ORDER BY createdAt DESC,rowid DESC LIMIT 30').all().map(parse)}
 }

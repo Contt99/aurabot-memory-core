@@ -39,7 +39,7 @@ export function createMemoryStore(db) {
   const corrected=old?.status==='corrected'
   if([row.id,...data.sourceIds].some(id=>{const r=reason(id);return r&&(r==='forgotten'||!corrected)}))return {id:row.id,invalidatedAt:1,data:{}}
   if(corrected&&data.vaultId&&!old.data.vaultId)retire.run(data.vaultId,'corrected')
-  const handoff=row.type==='utterance'&&!corrected&&(row.data?.origin==='onebot'||Number(row.occurredAt)>=liveSince)
+  const handoff=row.type==='utterance'&&!corrected&&(['onebot','pet-renderer'].includes(row.data?.origin)||Number(row.occurredAt)>=liveSince)
   const enqueue=()=>db.prepare("INSERT OR IGNORE INTO memory_handoffs(eventId,chatId,status) VALUES(?,?,'pending')").run(row.id,row.chatId)
   // A late duplicate receipt must not replace the authority's timestamp or excerpt.
   if(old?.data.vaultId&&row.data?.origin==='onebot'){if(handoff)enqueue();return old}
@@ -83,7 +83,12 @@ export function createMemoryStore(db) {
  }
  const finishRequest=(ids,status)=>{const update=db.prepare("UPDATE memory_snapshots SET data=json_set(data,'$.requestStatus',?) WHERE id=? AND invalidatedAt=0");for(const id of ids)update.run(status,id)}
  const allEvents=({chatId='',limit=100,type=''}={})=>db.prepare(`SELECT * FROM memory_events WHERE invalidatedAt=0 ${chatId?'AND chatId=?':''} ${type?'AND type=?':''} ORDER BY COALESCE(occurredAt,recordedAt) DESC,rowid DESC LIMIT ?`).all(...(chatId?[chatId]:[]),...(type?[type]:[]),Math.min(500,Math.max(1,Number(limit)||100))).map(parse)
- const latestEvent=(chatId,type)=>parse(db.prepare('SELECT * FROM memory_events WHERE chatId=? AND type=? ORDER BY COALESCE(occurredAt,recordedAt) DESC,rowid DESC LIMIT 1').get(chatId,type))
+ const latestEvent=(chatId,type,{excludeOrigin=''}={})=>parse(db.prepare(
+  "SELECT * FROM memory_events WHERE chatId=? AND type=? AND (?='' OR COALESCE(json_extract(data,'$.origin'),'')<>?) ORDER BY COALESCE(occurredAt,recordedAt) DESC,rowid DESC LIMIT 1"
+ ).get(chatId,type,excludeOrigin,excludeOrigin))
+ const recentPetSpeech=(chatId,t)=>db.prepare(
+  "SELECT * FROM memory_events WHERE invalidatedAt=0 AND chatId=? AND type='utterance' AND occurredAt BETWEEN ? AND ? AND json_extract(data,'$.origin')='pet-renderer' ORDER BY occurredAt DESC,rowid DESC LIMIT 4"
+ ).all(chatId,t-60*60_000,t).map(parse)
  function invalidateViews(ids) {
   const affected=new Set()
   for(const r of db.prepare('SELECT * FROM memory_snapshots WHERE invalidatedAt=0').all().map(parse)) {
@@ -140,5 +145,5 @@ export function createMemoryStore(db) {
  }
  const status=()=>({events:db.prepare('SELECT COUNT(*) n FROM memory_events WHERE invalidatedAt=0').get().n,pendingHandoffs:db.prepare("SELECT COUNT(*) n FROM memory_handoffs h WHERE h.status='pending' AND NOT EXISTS(SELECT 1 FROM memory_handoffs x WHERE x.eventId=h.eventId AND x.status='observed')").get().n,snapshotLimit,
   snapshots:db.prepare('SELECT id,chatId,purpose,sessionId,createdAt,status,invalidatedAt FROM memory_snapshots ORDER BY createdAt DESC,rowid DESC LIMIT 40').all(),corrections:db.prepare('SELECT id,targetId,at FROM memory_corrections ORDER BY at DESC LIMIT 40').all()})
- return{event,reason,pending,putEvent,prepare,snapshot,observed,finishRequest,allEvents,latestEvent,invalidate,correct,corrections,status}
+ return{event,reason,pending,putEvent,prepare,snapshot,observed,finishRequest,allEvents,latestEvent,recentPetSpeech,invalidate,correct,corrections,status}
 }

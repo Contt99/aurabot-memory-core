@@ -97,6 +97,18 @@ test('health distinguishes native QQ receipts from uncertain sends, and the list
  assert(ui.calls.filter(c=>c.path==='/candidates').every(c=>!c.options?.method))
 })
 
+test('health distinguishes desktop rendering from an unconfirmed relay and native QQ',async()=>{
+ const row={module:'purpose',job:'contact',target:'private:123',updatedAt:at,sourceIds:[]}
+ const ui=mount({'/candidates':{ok:true,items:[
+  {...row,id:'a',status:'shown',receipt:'pet:a'},
+  {...row,id:'b',status:'unknown',reason:'pet-unconfirmed'}
+ ]}})
+ await ui.settle();await ui.click('任务与健康')
+ assert.match(ui.text(),/桌宠已显示.*桌宠显示回执/)
+ assert.match(ui.text(),/结果未知.*桌宠未确认显示，不自动重发/)
+ assert.doesNotMatch(ui.text(),/QQ 回执 pet:/)
+})
+
 test('diary receipts identify the destination without showing private writing',async()=>{
  const ui=mount({'/candidates':{ok:true,items:[
   {id:'public',module:'diary',job:'publish',target:'qzone:10002',status:'sent',receipt:'space001',updatedAt:at,sourceIds:['vault:1']},

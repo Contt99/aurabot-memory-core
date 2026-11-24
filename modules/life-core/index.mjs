@@ -21,7 +21,7 @@ import {createBiliPlatform} from './lib/bili-platform.mjs'
 import {createBiliDelivery,isBiliQQJob} from './lib/bili-delivery.mjs'
 import {createRssPool} from './lib/rss-pool.mjs'
 
-const VERSION='0.2.0-local.18'
+const VERSION='0.2.0-local.19'
 const browseIds=['web_search','web_fetch','bili_browse','bili_watch','tieba_search','tieba_browse','tieba_read','save_note']
 export default {
  id:'life-core',name:'行动与经历核心',version:VERSION,api:1,panel:'panel.js',
@@ -368,8 +368,22 @@ export default {
    candidateSources: chatId=>{const m=context.getStore();return m?.candidateId&&m.chatId===chatId?m.sourceIds||[]:[]}})
   const diaryDispatch=createDiaryDispatch({candidates,now,active,disposed:()=>disposed,sleeping,cfg,hub:()=>api.core.hub,continuity,assertSourcesCurrent,
    jobFor:candidateJob,permission:candidatePermission,record:recordOutcome})
+  function savePetSpeech(row,receipt,preserve){
+   ledger.database.exec('BEGIN IMMEDIATE')
+   try{
+    const confirmed=candidates.confirm(row.id,row.target,'shown','pet:'+row.id)
+    if(confirmed&&preserve){
+     const sourceIds=candidates.get(row.id)?.sourceIds||[]
+     context.exit(()=>recordOutcome({module:'pet',action:'bubble-shown',callId:'bubble:'+row.id,chatId:row.target,
+      sourceScopes:[row.target],sourceIds,self:true,public:false,evidenceType:'pet-shown',occurredAt:receipt.shownAt},
+      {ok:true,text:receipt.text,deliveryId:row.id}))
+    }
+    ledger.database.exec('COMMIT')
+    return confirmed
+   }catch(e){ledger.database.exec('ROLLBACK');throw e}
+  }
   const contactDispatch=createContactDispatch({candidates,now,active,disposed:()=>disposed,sleeping,cfg,hub:()=>api.core.hub,continuity,
-   jobFor:candidateJob,canTarget:canTouch,permission:candidatePermission,context})
+   jobFor:candidateJob,canTarget:canTouch,permission:candidatePermission,context,pet:()=>enabled('pet')?moduleFor('pet'):null,savePetSpeech})
   const qzonePlatform=createQzonePlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const biliPlatform=createBiliPlatform({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,record:recordOutcome})
   const biliDelivery=createBiliDelivery({api,candidates,now,cfg,active,disposed:()=>disposed,sleeping,enabled,ledger,actionCurrent,continuity,context,canTarget:canTouch})

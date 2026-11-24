@@ -8,7 +8,7 @@ export function authorizedChat(cfg,chatId) {
  return /^group:\d+$/.test(chatId)&&groupList(cfg.allow?.groups).includes(chatId)
 }
 const eligible=(row,cfg,chatId,purpose='chat')=>row&&(purpose==='autonomy'||purpose==='public-share'?allowedSource(row,cfg,'autonomy'):authorizedChat(cfg,chatId)&&allowedSource(row,cfg,'chat',chatId))
- && !['running','simulated'].includes(row.status)&&!['qq-ack','outbound-attempt'].includes(row.meta.evidenceType)
+ && !['running','simulated'].includes(row.status)&&!['qq-ack','pet-shown','outbound-attempt'].includes(row.meta.evidenceType)
  && (purpose!=='public-share'||row.status==='succeeded'&&publicSafe(summarizeAction(row).text.replace(/https?:\/\/[^\s；，。"'<>]+/g,'[公开来源链接]')))
 const terms=text=>[...new Set((String(text).toLowerCase().match(/[a-z\d_-]{2,}|[\u4e00-\u9fff]{2,}/g)||[]).flatMap(s=>/^[\u4e00-\u9fff]+$/.test(s)?Array.from({length:s.length-1},(_,i)=>s.slice(i,i+2)):[s]))].slice(0,80)
 export function summarizeAction(row) {
